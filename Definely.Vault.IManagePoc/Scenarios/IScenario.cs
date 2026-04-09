@@ -8,5 +8,5 @@ public interface IScenario
 {
     string Name { get; }
     Task RunAsync(PocDbContext db, HttpClient httpClient, iManageAuthClient authClient,
-        IConfigurationSection config, CancellationToken cancellationToken);
+        IConfiguration config, CancellationToken cancellationToken);
 }

@@ -57,6 +57,7 @@ internal class Program
         Console.WriteLine("  2 - Optimised Current APIs (parallel + in-memory tree)");
         Console.WriteLine("  3 - Sync API (bulk crawl)");
         Console.WriteLine("  4 - Change Events (incremental sync)");
+        Console.WriteLine("  r - Reset database (delete all data)");
         Console.WriteLine("  q - Quit");
         Console.WriteLine();
 
@@ -71,13 +72,26 @@ internal class Program
                 return;
             }
 
+            if (input == "r" || input == "R")
+            {
+                Console.Write("Are you sure? This will delete ALL data. (y/n): ");
+                var confirm = Console.ReadLine()?.Trim();
+                if (confirm == "y" || confirm == "Y")
+                {
+                    await db.Database.EnsureDeletedAsync();
+                    await db.Database.EnsureCreatedAsync();
+                    Console.WriteLine("[DB] Database reset complete.");
+                }
+                continue;
+            }
+
             if (scenarios.TryGetValue(input!, out var scenario))
             {
                 Console.WriteLine($"\nRunning: {scenario.Name}\n");
                 try
                 {
                     using var cts = new CancellationTokenSource();
-                    await scenario.RunAsync(db, httpClient, authClient, imanageConfig, cts.Token);
+                    await scenario.RunAsync(db, httpClient, authClient, config, cts.Token);
                 }
                 catch (Exception ex)
                 {

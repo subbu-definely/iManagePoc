@@ -13,14 +13,24 @@ public class Scenario3SyncApi : IScenario
     public string Name => "Scenario 3: Sync API (Bulk Crawl)";
 
     public async Task RunAsync(PocDbContext db, HttpClient httpClient, iManageAuthClient authClient,
-        IConfigurationSection config, CancellationToken ct)
+        IConfiguration config, CancellationToken ct)
     {
         var metrics = new BenchmarkMetrics();
-        var baseUrl = config["BaseUrl"]!;
-        var customerId = int.Parse(config["CustomerId"]!);
-        var libraryId = config["LibraryId"]!;
+        var imanage = config.GetSection("IManage");
+        var baseUrl = imanage["BaseUrl"]!;
+        var customerId = int.Parse(imanage["CustomerId"]!);
+        var libraryId = imanage["LibraryId"]!;
 
-        var client = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, libraryId, metrics);
+        var poc = config.GetSection("Poc");
+        var maxRecords = int.TryParse(poc["MaxRecordsPerEndpoint"], out var mr) ? mr : 0;
+        var pageSize = int.TryParse(poc["PageSize"], out var ps) ? ps : 1000;
+
+        if (maxRecords > 0)
+            Console.WriteLine($"[Config] MaxRecordsPerEndpoint: {maxRecords}, PageSize: {pageSize}");
+        else
+            Console.WriteLine($"[Config] No record limit — full crawl, PageSize: {pageSize}");
+
+        var client = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, libraryId, metrics, maxRecords);
 
         // Create sync job record
         var syncJob = new DmsSyncJobInfo
@@ -38,7 +48,7 @@ public class Scenario3SyncApi : IScenario
         {
             // Step 1: Crawl documents
             Console.WriteLine("\n--- Step 1: Crawl Document Profiles ---");
-            var documents = await client.CrawlDocumentsAsync(ct: ct);
+            var documents = await client.CrawlDocumentsAsync(pageSize, ct);
             var docEntities = MapDocuments(documents, syncJob.Id, libraryId);
             db.DmsSyncDocuments.AddRange(docEntities);
             await db.SaveChangesAsync(ct);
@@ -46,14 +56,14 @@ public class Scenario3SyncApi : IScenario
 
             // Step 2: Crawl document parents
             Console.WriteLine("\n--- Step 2: Crawl Document Parents ---");
-            var parents = await client.CrawlDocumentParentsAsync(ct: ct);
+            var parents = await client.CrawlDocumentParentsAsync(pageSize, ct);
             UpdateDocumentParents(docEntities, parents, libraryId);
             await db.SaveChangesAsync(ct);
             Console.WriteLine($"[DB] Updated parent IDs for documents");
 
             // Step 3: Crawl workspaces
             Console.WriteLine("\n--- Step 3: Crawl Workspaces ---");
-            var workspaces = await client.CrawlWorkspacesAsync(ct: ct);
+            var workspaces = await client.CrawlWorkspacesAsync(pageSize, ct);
             var wsEntities = MapWorkspaces(workspaces, syncJob.Id, libraryId);
             db.DmsSyncFolders.AddRange(wsEntities);
             await db.SaveChangesAsync(ct);
@@ -61,7 +71,7 @@ public class Scenario3SyncApi : IScenario
 
             // Step 4: Crawl folders
             Console.WriteLine("\n--- Step 4: Crawl Folders ---");
-            var folders = await client.CrawlFoldersAsync(ct: ct);
+            var folders = await client.CrawlFoldersAsync(pageSize, ct);
             var folderEntities = MapFolders(folders, syncJob.Id, libraryId);
             db.DmsSyncFolders.AddRange(folderEntities);
             await db.SaveChangesAsync(ct);
@@ -69,7 +79,7 @@ public class Scenario3SyncApi : IScenario
 
             // Step 5: Crawl allowed document trustees
             Console.WriteLine("\n--- Step 5: Crawl Allowed Document Trustees ---");
-            var allowedDocTrustees = await client.CrawlAllowedDocumentTrusteesAsync(ct: ct);
+            var allowedDocTrustees = await client.CrawlAllowedDocumentTrusteesAsync(pageSize, ct);
             var allowedDocPermEntities = MapDocumentPermissions(allowedDocTrustees, syncJob.Id);
             db.DmsSyncDocumentPermissions.AddRange(allowedDocPermEntities);
             await db.SaveChangesAsync(ct);
@@ -77,7 +87,7 @@ public class Scenario3SyncApi : IScenario
 
             // Step 6: Crawl denied document trustees
             Console.WriteLine("\n--- Step 6: Crawl Denied Document Trustees ---");
-            var deniedDocTrustees = await client.CrawlDeniedDocumentTrusteesAsync(ct: ct);
+            var deniedDocTrustees = await client.CrawlDeniedDocumentTrusteesAsync(pageSize, ct);
             var deniedDocPermEntities = MapDocumentPermissions(deniedDocTrustees, syncJob.Id);
             db.DmsSyncDocumentPermissions.AddRange(deniedDocPermEntities);
             await db.SaveChangesAsync(ct);
@@ -85,7 +95,7 @@ public class Scenario3SyncApi : IScenario
 
             // Step 7: Crawl allowed container trustees
             Console.WriteLine("\n--- Step 7: Crawl Allowed Container Trustees ---");
-            var allowedContainerTrustees = await client.CrawlAllowedContainerTrusteesAsync(ct: ct);
+            var allowedContainerTrustees = await client.CrawlAllowedContainerTrusteesAsync(pageSize, ct);
             var allowedFolderPermEntities = MapFolderPermissions(allowedContainerTrustees, syncJob.Id);
             db.DmsSyncFolderPermissions.AddRange(allowedFolderPermEntities);
             await db.SaveChangesAsync(ct);
@@ -93,7 +103,7 @@ public class Scenario3SyncApi : IScenario
 
             // Step 8: Crawl denied container trustees
             Console.WriteLine("\n--- Step 8: Crawl Denied Container Trustees ---");
-            var deniedContainerTrustees = await client.CrawlDeniedContainerTrusteesAsync(ct: ct);
+            var deniedContainerTrustees = await client.CrawlDeniedContainerTrusteesAsync(pageSize, ct);
             var deniedFolderPermEntities = MapFolderPermissions(deniedContainerTrustees, syncJob.Id);
             db.DmsSyncFolderPermissions.AddRange(deniedFolderPermEntities);
             await db.SaveChangesAsync(ct);
@@ -101,7 +111,7 @@ public class Scenario3SyncApi : IScenario
 
             // Step 9: Crawl users
             Console.WriteLine("\n--- Step 9: Crawl Users ---");
-            var users = await client.CrawlUsersAsync(ct: ct);
+            var users = await client.CrawlUsersAsync(pageSize, ct);
             var userEntities = MapUsers(users, syncJob.Id);
             db.DmsSyncJobUsers.AddRange(userEntities);
             await db.SaveChangesAsync(ct);
@@ -109,13 +119,13 @@ public class Scenario3SyncApi : IScenario
 
             // Step 10: Crawl groups + members
             Console.WriteLine("\n--- Step 10: Crawl Groups & Members ---");
-            var groups = await client.CrawlGroupsAsync(ct: ct);
+            var groups = await client.CrawlGroupsAsync(pageSize, ct);
             var groupEntities = MapCabinetGroups(groups, syncJob.Id, libraryId);
             db.DmsSyncJobCabinetGroups.AddRange(groupEntities);
             await db.SaveChangesAsync(ct);
             Console.WriteLine($"[DB] Saved {groupEntities.Count} cabinet groups");
 
-            var groupMembers = await client.CrawlGroupMembersAsync(ct: ct);
+            var groupMembers = await client.CrawlGroupMembersAsync(pageSize, ct);
             var memberEntities = MapGroupMembers(groupMembers, syncJob.Id);
             db.DmsSyncJobGroupMembers.AddRange(memberEntities);
             await db.SaveChangesAsync(ct);

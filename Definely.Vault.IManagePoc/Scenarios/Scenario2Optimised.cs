@@ -9,7 +9,7 @@ public class Scenario2Optimised : IScenario
     public string Name => "Scenario 2: Optimised Current APIs (Parallel + In-Memory Tree)";
 
     public Task RunAsync(PocDbContext db, HttpClient httpClient, iManageAuthClient authClient,
-        IConfigurationSection config, CancellationToken cancellationToken)
+        IConfiguration config, CancellationToken cancellationToken)
     {
         Console.WriteLine("Not yet implemented.");
         return Task.CompletedTask;

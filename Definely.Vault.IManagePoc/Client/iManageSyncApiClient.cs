@@ -14,8 +14,9 @@ public class iManageSyncApiClient
     private readonly int _customerId;
     private readonly string _libraryId;
     private readonly BenchmarkMetrics _metrics;
+    private readonly int _maxRecords;
 
-    public iManageSyncApiClient(HttpClient httpClient, iManageAuthClient authClient, string baseUrl, int customerId, string libraryId, BenchmarkMetrics metrics)
+    public iManageSyncApiClient(HttpClient httpClient, iManageAuthClient authClient, string baseUrl, int customerId, string libraryId, BenchmarkMetrics metrics, int maxRecords = 0)
     {
         _httpClient = httpClient;
         _authClient = authClient;
@@ -23,6 +24,7 @@ public class iManageSyncApiClient
         _customerId = customerId;
         _libraryId = libraryId;
         _metrics = metrics;
+        _maxRecords = maxRecords; // 0 = no limit
     }
 
     public async Task<List<JsonElement>> CrawlLibrariesAsync(int pageSize = 1000, CancellationToken ct = default)
@@ -114,6 +116,7 @@ public class iManageSyncApiClient
 
             if (doc.RootElement.TryGetProperty("cursor", out var cursor) && data.GetArrayLength() >= pageSize)
             {
+                if (_maxRecords > 0 && allResults.Count >= _maxRecords) break;
                 url = $"{_baseUrl}/api/v2/customers/{_customerId}/libraries/{_libraryId}/sync/users?limit={pageSize}&cursor={cursor.GetString()}";
                 token = await _authClient.GetAccessTokenAsync(ct);
             }
@@ -150,6 +153,7 @@ public class iManageSyncApiClient
 
             if (doc.RootElement.TryGetProperty("cursor", out var cursor) && data.GetArrayLength() >= pageSize)
             {
+                if (_maxRecords > 0 && allResults.Count >= _maxRecords) break;
                 url = $"{_baseUrl}/api/v2/customers/{_customerId}/libraries/{_libraryId}/sync/groups?limit={pageSize}&cursor={cursor.GetString()}";
                 token = await _authClient.GetAccessTokenAsync(ct);
             }
@@ -205,6 +209,12 @@ public class iManageSyncApiClient
 
             if (count < pageSize || !doc.RootElement.TryGetProperty("cursor", out var cursorElement))
                 break;
+
+            if (_maxRecords > 0 && allResults.Count >= _maxRecords)
+            {
+                Console.WriteLine($"[Crawl] {metricName}: reached max records limit ({_maxRecords})");
+                break;
+            }
 
             cursor = cursorElement.GetString();
         }

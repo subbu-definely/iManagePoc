@@ -9,7 +9,7 @@ public class Scenario1Baseline : IScenario
     public string Name => "Scenario 1: Current Solution Baseline (Sequential)";
 
     public Task RunAsync(PocDbContext db, HttpClient httpClient, iManageAuthClient authClient,
-        IConfigurationSection config, CancellationToken cancellationToken)
+        IConfiguration config, CancellationToken cancellationToken)
     {
         Console.WriteLine("Not yet implemented.");
         return Task.CompletedTask;

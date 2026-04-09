@@ -9,7 +9,7 @@ public class Scenario4ChangeEvents : IScenario
     public string Name => "Scenario 4: Change Events (Incremental Sync)";
 
     public Task RunAsync(PocDbContext db, HttpClient httpClient, iManageAuthClient authClient,
-        IConfigurationSection config, CancellationToken cancellationToken)
+        IConfiguration config, CancellationToken cancellationToken)
     {
         Console.WriteLine("Not yet implemented.");
         return Task.CompletedTask;
