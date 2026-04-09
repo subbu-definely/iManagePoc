@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: imanage-poc-db
+    environment:
+      POSTGRES_DB: imanage_poc
+      POSTGRES_USER: poc_user
+      POSTGRES_PASSWORD: poc_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - poc-pgdata:/var/lib/postgresql/data
+
+volumes:
+  poc-pgdata:
