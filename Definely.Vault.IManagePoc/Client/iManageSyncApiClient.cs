@@ -102,8 +102,7 @@ public class iManageSyncApiClient
             request.Headers.Add("X-Auth-Token", token);
             _metrics.IncrementApiCall("crawl_global_users");
 
-            var response = await _httpClient.SendAsync(request, ct);
-            response.EnsureSuccessStatusCode();
+            var response = await SendWithRetryAsync(request, "crawl_global_users", ct);
 
             var json = await response.Content.ReadAsStringAsync(ct);
             var doc = JsonDocument.Parse(json);
@@ -139,8 +138,7 @@ public class iManageSyncApiClient
             request.Headers.Add("X-Auth-Token", token);
             _metrics.IncrementApiCall("crawl_library_users");
 
-            var response = await _httpClient.SendAsync(request, ct);
-            response.EnsureSuccessStatusCode();
+            var response = await SendWithRetryAsync(request, "crawl_library_users", ct);
 
             var json = await response.Content.ReadAsStringAsync(ct);
             var doc = JsonDocument.Parse(json);
@@ -176,8 +174,7 @@ public class iManageSyncApiClient
             request.Headers.Add("X-Auth-Token", token);
             _metrics.IncrementApiCall("crawl_groups");
 
-            var response = await _httpClient.SendAsync(request, ct);
-            response.EnsureSuccessStatusCode();
+            var response = await SendWithRetryAsync(request, "crawl_groups", ct);
 
             var json = await response.Content.ReadAsStringAsync(ct);
             var doc = JsonDocument.Parse(json);
@@ -232,8 +229,7 @@ public class iManageSyncApiClient
 
             _metrics.IncrementApiCall(metricName);
 
-            var response = await _httpClient.SendAsync(request, ct);
-            response.EnsureSuccessStatusCode();
+            var response = await SendWithRetryAsync(request, metricName, ct);
 
             var json = await response.Content.ReadAsStringAsync(ct);
             var doc = JsonDocument.Parse(json);
@@ -258,5 +254,52 @@ public class iManageSyncApiClient
 
         Console.WriteLine($"[Crawl] {metricName}: {allResults.Count} records");
         return allResults;
+    }
+
+    private async Task<HttpResponseMessage> SendWithRetryAsync(HttpRequestMessage request, string metricName, CancellationToken ct, int maxRetries = 3)
+    {
+        for (var attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            // Clone the request for retries (HttpRequestMessage can only be sent once)
+            var clonedRequest = await CloneRequestAsync(request);
+
+            var response = await _httpClient.SendAsync(clonedRequest, ct);
+
+            if ((int)response.StatusCode == 429 || response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
+            {
+                if (attempt == maxRetries)
+                {
+                    Console.WriteLine($"[RateLimit] {metricName}: max retries ({maxRetries}) exceeded");
+                    response.EnsureSuccessStatusCode(); // will throw
+                }
+
+                var retryAfter = response.Headers.RetryAfter?.Delta?.TotalSeconds
+                    ?? Math.Pow(2, attempt + 1); // exponential backoff: 2s, 4s, 8s
+
+                Console.WriteLine($"[RateLimit] {metricName}: rate limited, waiting {retryAfter:F0}s (attempt {attempt + 1}/{maxRetries})");
+                await Task.Delay(TimeSpan.FromSeconds(retryAfter), ct);
+                continue;
+            }
+
+            response.EnsureSuccessStatusCode();
+            return response;
+        }
+
+        throw new InvalidOperationException("Retry loop exited unexpectedly");
+    }
+
+    private static async Task<HttpRequestMessage> CloneRequestAsync(HttpRequestMessage request)
+    {
+        var clone = new HttpRequestMessage(request.Method, request.RequestUri);
+        foreach (var header in request.Headers)
+            clone.Headers.TryAddWithoutValidation(header.Key, header.Value);
+
+        if (request.Content != null)
+        {
+            var content = await request.Content.ReadAsStringAsync();
+            clone.Content = new StringContent(content, Encoding.UTF8, request.Content.Headers.ContentType?.MediaType ?? "application/json");
+        }
+
+        return clone;
     }
 }

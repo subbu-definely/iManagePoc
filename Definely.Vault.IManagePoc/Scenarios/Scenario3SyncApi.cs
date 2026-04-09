@@ -168,7 +168,10 @@ public class Scenario3SyncApi : IScenario
                 WorkspacesDiscovered = wsEntities.Count,
                 PermissionRecords = allowedDocPermEntities.Count + deniedDocPermEntities.Count
                     + allowedFolderPermEntities.Count + deniedFolderPermEntities.Count,
-                PeakMemoryMb = metrics.PeakMemoryMb
+                PeakMemoryMb = metrics.PeakMemoryMb,
+                Notes = $"Library={libraryId}, PageSize={pageSize}, MaxRecords={maxRecords}, " +
+                    $"FullCrawl={maxRecords == 0}, AllLibraries=false, " +
+                    $"GlobalUsers={globalUserEntities.Count}, LibraryUsers={libraryUsers.Count}"
             };
             db.BenchmarkRuns.Add(run);
             await db.SaveChangesAsync(ct);
