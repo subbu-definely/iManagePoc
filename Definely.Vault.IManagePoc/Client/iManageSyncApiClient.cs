@@ -90,7 +90,44 @@ public class iManageSyncApiClient
             "crawl_denied_container_trustees", pageSize, ct);
     }
 
-    public async Task<List<JsonElement>> CrawlUsersAsync(int pageSize = 1000, CancellationToken ct = default)
+    public async Task<List<JsonElement>> CrawlGlobalUsersAsync(int pageSize = 1000, CancellationToken ct = default)
+    {
+        var token = await _authClient.GetAccessTokenAsync(ct);
+        var url = $"{_baseUrl}/platform/api/v2/customers/{_customerId}/sync/users?limit={pageSize}";
+        var allResults = new List<JsonElement>();
+
+        while (true)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Add("X-Auth-Token", token);
+            _metrics.IncrementApiCall("crawl_global_users");
+
+            var response = await _httpClient.SendAsync(request, ct);
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var doc = JsonDocument.Parse(json);
+
+            if (doc.RootElement.TryGetProperty("data", out var data))
+            {
+                foreach (var item in data.EnumerateArray())
+                    allResults.Add(item.Clone());
+            }
+
+            if (doc.RootElement.TryGetProperty("cursor", out var cursor) && data.GetArrayLength() >= pageSize)
+            {
+                if (_maxRecords > 0 && allResults.Count >= _maxRecords) break;
+                url = $"{_baseUrl}/platform/api/v2/customers/{_customerId}/sync/users?limit={pageSize}&cursor={cursor.GetString()}";
+                token = await _authClient.GetAccessTokenAsync(ct);
+            }
+            else break;
+        }
+
+        Console.WriteLine($"[Crawl] Global users: {allResults.Count} records");
+        return allResults;
+    }
+
+    public async Task<List<JsonElement>> CrawlLibraryUsersAsync(int pageSize = 1000, CancellationToken ct = default)
     {
         var token = await _authClient.GetAccessTokenAsync(ct);
         var url = $"{_baseUrl}/api/v2/customers/{_customerId}/libraries/{_libraryId}/sync/users?limit={pageSize}";
@@ -100,7 +137,7 @@ public class iManageSyncApiClient
         {
             var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.Add("X-Auth-Token", token);
-            _metrics.IncrementApiCall("crawl_users");
+            _metrics.IncrementApiCall("crawl_library_users");
 
             var response = await _httpClient.SendAsync(request, ct);
             response.EnsureSuccessStatusCode();
@@ -123,7 +160,7 @@ public class iManageSyncApiClient
             else break;
         }
 
-        Console.WriteLine($"[Crawl] Users: {allResults.Count} records");
+        Console.WriteLine($"[Crawl] Library users: {allResults.Count} records");
         return allResults;
     }
 

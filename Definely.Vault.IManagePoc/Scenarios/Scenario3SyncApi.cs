@@ -109,13 +109,18 @@ public class Scenario3SyncApi : IScenario
             await db.SaveChangesAsync(ct);
             Console.WriteLine($"[DB] Saved {deniedFolderPermEntities.Count} denied container permissions");
 
-            // Step 9: Crawl users
-            Console.WriteLine("\n--- Step 9: Crawl Users ---");
-            var users = await client.CrawlUsersAsync(pageSize, ct);
-            var userEntities = MapUsers(users, syncJob.Id);
-            db.DmsSyncJobUsers.AddRange(userEntities);
+            // Step 9a: Crawl global users
+            Console.WriteLine("\n--- Step 9a: Crawl Global Users ---");
+            var globalUsers = await client.CrawlGlobalUsersAsync(pageSize, ct);
+            var globalUserEntities = MapUsers(globalUsers, syncJob.Id);
+            db.DmsSyncJobUsers.AddRange(globalUserEntities);
             await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {userEntities.Count} users");
+            Console.WriteLine($"[DB] Saved {globalUserEntities.Count} global users");
+
+            // Step 9b: Crawl library users
+            Console.WriteLine("\n--- Step 9b: Crawl Library Users ---");
+            var libraryUsers = await client.CrawlLibraryUsersAsync(pageSize, ct);
+            Console.WriteLine($"[Info] Library users: {libraryUsers.Count} (not saved separately — for comparison)");
 
             // Step 10: Crawl groups + members
             Console.WriteLine("\n--- Step 10: Crawl Groups & Members ---");

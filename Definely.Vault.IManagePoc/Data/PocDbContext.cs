@@ -22,7 +22,6 @@ public class PocDbContext : DbContext
         // DmsSyncJobInfo (parent)
         modelBuilder.Entity<DmsSyncJobInfo>(e =>
         {
-            e.ToTable("dms_sync_job_infos");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
         });
@@ -30,7 +29,6 @@ public class PocDbContext : DbContext
         // DmsSyncDocument
         modelBuilder.Entity<DmsSyncDocument>(e =>
         {
-            e.ToTable("dms_sync_documents");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
             e.HasOne(x => x.DmsSyncJobInfo)
@@ -40,13 +38,12 @@ public class PocDbContext : DbContext
             e.HasIndex(x => x.DmsSyncJobInfoId);
             e.Property(x => x.ParentIdsJson).HasColumnType("text[]");
             e.Property(x => x.AuthorsJson).HasColumnType("text[]");
-            e.Ignore(x => x.DocumentNumber); // Helper property, not persisted
+            e.Ignore(x => x.DocumentNumber);
         });
 
         // DmsSyncFolder
         modelBuilder.Entity<DmsSyncFolder>(e =>
         {
-            e.ToTable("dms_sync_folders");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
             e.HasOne(x => x.DmsSyncJobInfo)
@@ -59,7 +56,6 @@ public class PocDbContext : DbContext
         // DmsSyncDocumentPermission
         modelBuilder.Entity<DmsSyncDocumentPermission>(e =>
         {
-            e.ToTable("dms_sync_document_permissions");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
             e.HasOne(x => x.DmsSyncJobInfo)
@@ -73,7 +69,6 @@ public class PocDbContext : DbContext
         // DmsSyncFolderPermission
         modelBuilder.Entity<DmsSyncFolderPermission>(e =>
         {
-            e.ToTable("dms_sync_folder_permissions");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
             e.HasOne(x => x.DmsSyncJobInfo)
@@ -87,7 +82,6 @@ public class PocDbContext : DbContext
         // DmsSyncJobUser
         modelBuilder.Entity<DmsSyncJobUser>(e =>
         {
-            e.ToTable("dms_sync_job_users");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
             e.HasOne(x => x.DmsSyncJobInfo)
@@ -101,7 +95,6 @@ public class PocDbContext : DbContext
         // DmsSyncJobCabinetGroup
         modelBuilder.Entity<DmsSyncJobCabinetGroup>(e =>
         {
-            e.ToTable("dms_sync_job_cabinet_groups");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
             e.HasOne(x => x.DmsSyncJobInfo)
@@ -115,7 +108,6 @@ public class PocDbContext : DbContext
         // DmsSyncJobGroupMember
         modelBuilder.Entity<DmsSyncJobGroupMember>(e =>
         {
-            e.ToTable("dms_sync_job_group_members");
             e.HasKey(x => x.Id);
             e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
             e.HasOne(x => x.DmsSyncJobInfo)
@@ -129,7 +121,7 @@ public class PocDbContext : DbContext
         // BenchmarkRun (POC-only)
         modelBuilder.Entity<BenchmarkRun>(e =>
         {
-            e.ToTable("poc_benchmark_runs");
+            e.ToTable("PocBenchmarkRuns");
             e.HasKey(x => x.Id);
             e.HasIndex(x => x.RunId).IsUnique();
         });
