@@ -1,5 +1,6 @@
 using Definely.Vault.IManagePoc.Auth;
 using Definely.Vault.IManagePoc.Data;
+using Definely.Vault.IManagePoc.Scenarios;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 
@@ -26,7 +27,7 @@ internal class Program
 
         // Set up auth client
         var httpClient = new HttpClient();
-        var authClient = new IManageAuthClient(
+        var authClient = new iManageAuthClient(
             httpClient,
             imanageConfig["AuthUrl"]!,
             imanageConfig["Username"]!,
@@ -35,8 +36,17 @@ internal class Program
             imanageConfig["ClientSecret"]!);
 
         // Test authentication
-        var token = await authClient.GetAccessTokenAsync();
-        Console.WriteLine($"[Auth] Authenticated successfully.");
+        await authClient.GetAccessTokenAsync();
+        Console.WriteLine("[Auth] Authenticated successfully.");
+
+        // Available scenarios
+        var scenarios = new Dictionary<string, IScenario>
+        {
+            ["1"] = new Scenario1Baseline(),
+            ["2"] = new Scenario2Optimised(),
+            ["3"] = new Scenario3SyncApi(),
+            ["4"] = new Scenario4ChangeEvents()
+        };
 
         // Menu
         Console.WriteLine();
@@ -55,31 +65,29 @@ internal class Program
             Console.Write("> ");
             var input = Console.ReadLine()?.Trim();
 
-            switch (input)
+            if (input == "q" || input == "Q")
             {
-                case "1":
-                    Console.WriteLine("Scenario 1: Current Solution Baseline — not yet implemented");
-                    // TODO: await Scenario1.RunAsync(db, httpClient, authClient, imanageConfig);
-                    break;
-                case "2":
-                    Console.WriteLine("Scenario 2: Optimised Current APIs — not yet implemented");
-                    // TODO: await Scenario2.RunAsync(db, httpClient, authClient, imanageConfig);
-                    break;
-                case "3":
-                    Console.WriteLine("Scenario 3: Sync API — not yet implemented");
-                    // TODO: await Scenario3.RunAsync(db, httpClient, authClient, imanageConfig);
-                    break;
-                case "4":
-                    Console.WriteLine("Scenario 4: Change Events — not yet implemented");
-                    // TODO: await Scenario4.RunAsync(db, httpClient, authClient, imanageConfig);
-                    break;
-                case "q":
-                case "Q":
-                    Console.WriteLine("Done.");
-                    return;
-                default:
-                    Console.WriteLine("Invalid selection. Enter 1, 2, 3, 4, or q.");
-                    break;
+                Console.WriteLine("Done.");
+                return;
+            }
+
+            if (scenarios.TryGetValue(input!, out var scenario))
+            {
+                Console.WriteLine($"\nRunning: {scenario.Name}\n");
+                try
+                {
+                    using var cts = new CancellationTokenSource();
+                    await scenario.RunAsync(db, httpClient, authClient, imanageConfig, cts.Token);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"\n[Error] Scenario failed: {ex.Message}");
+                }
+                Console.WriteLine();
+            }
+            else
+            {
+                Console.WriteLine("Invalid selection. Enter 1, 2, 3, 4, or q.");
             }
         }
     }

@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace Definely.Vault.IManagePoc.Auth;
 
-public class IManageAuthClient
+public class iManageAuthClient
 {
     private readonly HttpClient _httpClient;
     private readonly string _authUrl;
@@ -15,7 +15,9 @@ public class IManageAuthClient
     private string? _accessToken;
     private DateTime _tokenExpiry = DateTime.MinValue;
 
-    public IManageAuthClient(HttpClient httpClient, string authUrl, string username, string password, string clientId, string clientSecret)
+    public int TokenRefreshCount { get; private set; }
+
+    public iManageAuthClient(HttpClient httpClient, string authUrl, string username, string password, string clientId, string clientSecret)
     {
         _httpClient = httpClient;
         _authUrl = authUrl;
@@ -49,12 +51,11 @@ public class IManageAuthClient
 
         _accessToken = tokenResponse!.AccessToken;
         _tokenExpiry = DateTime.UtcNow.AddSeconds(tokenResponse.ExpiresIn);
+        TokenRefreshCount++;
 
-        Console.WriteLine($"[Auth] Token obtained, expires in {tokenResponse.ExpiresIn}s");
+        Console.WriteLine($"[Auth] Token obtained, expires in {tokenResponse.ExpiresIn}s (refresh #{TokenRefreshCount})");
         return _accessToken;
     }
-
-    public int TokenRefreshCount { get; private set; }
 }
 
 public class TokenResponse

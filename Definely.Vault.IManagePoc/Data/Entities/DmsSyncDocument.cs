@@ -25,5 +25,8 @@ public class DmsSyncDocument
     public Guid RuleId { get; set; } // ImportRuleId
     public string[] AuthorsJson { get; set; } = [];
 
+    // Helper — not in Vault schema, used for parent mapping during POC
+    public int DocumentNumber { get; set; }
+
     public DmsSyncJobInfo DmsSyncJobInfo { get; set; } = null!;
 }
