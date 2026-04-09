@@ -173,12 +173,20 @@ public class Scenario3SyncApi : IScenario
         catch (Exception ex)
         {
             metrics.Stop();
-            syncJob.SyncJobState = 256; // Error
-            syncJob.ErrorDetails = ex.Message;
-            syncJob.FinishedAt = DateTimeOffset.UtcNow;
-            await db.SaveChangesAsync(ct);
             Console.WriteLine($"[Error] {ex.Message}");
-            throw;
+            if (ex.InnerException != null)
+                Console.WriteLine($"[Inner] {ex.InnerException.Message}");
+            if (ex.InnerException?.InnerException != null)
+                Console.WriteLine($"[Inner2] {ex.InnerException.InnerException.Message}");
+
+            try
+            {
+                syncJob.SyncJobState = 256; // Error
+                syncJob.ErrorDetails = ex.InnerException?.Message ?? ex.Message;
+                syncJob.FinishedAt = DateTimeOffset.UtcNow;
+                await db.SaveChangesAsync(ct);
+            }
+            catch { /* ignore save errors during error handling */ }
         }
     }
 

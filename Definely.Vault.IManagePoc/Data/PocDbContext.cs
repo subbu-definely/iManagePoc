@@ -38,8 +38,9 @@ public class PocDbContext : DbContext
                 .HasForeignKey(x => x.DmsSyncJobInfoId)
                 .OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => x.DmsSyncJobInfoId);
-            e.Property(x => x.ParentIdsJson).HasColumnType("jsonb");
-            e.Property(x => x.AuthorsJson).HasColumnType("jsonb");
+            e.Property(x => x.ParentIdsJson).HasColumnType("text[]");
+            e.Property(x => x.AuthorsJson).HasColumnType("text[]");
+            e.Ignore(x => x.DocumentNumber); // Helper property, not persisted
         });
 
         // DmsSyncFolder
