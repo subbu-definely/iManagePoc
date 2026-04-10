@@ -19,7 +19,7 @@ public class Scenario3SyncApi : IScenario
         var imanage = config.GetSection("IManage");
         var baseUrl = imanage["BaseUrl"]!;
         var customerId = int.Parse(imanage["CustomerId"]!);
-        var libraryId = imanage["LibraryId"]!;
+        var libraryIdConfig = imanage["LibraryId"]!;
 
         var poc = config.GetSection("Poc");
         var maxRecords = int.TryParse(poc["MaxRecordsPerEndpoint"], out var mr) ? mr : 0;
@@ -30,7 +30,21 @@ public class Scenario3SyncApi : IScenario
         else
             Console.WriteLine($"[Config] No record limit — full crawl, PageSize: {pageSize}");
 
-        var client = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, libraryId, metrics, maxRecords);
+        // Resolve library list
+        List<string> libraryIds;
+        if (libraryIdConfig == "*")
+        {
+            Console.WriteLine("\n--- Discovering all libraries ---");
+            var discoveryClient = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, "placeholder", metrics, maxRecords);
+            var libraries = await discoveryClient.CrawlLibrariesAsync(pageSize, ct);
+            libraryIds = libraries.Select(l => l.GetProperty("id").GetString()!).ToList();
+            Console.WriteLine($"[Libraries] Found {libraryIds.Count}: {string.Join(", ", libraryIds)}");
+        }
+        else
+        {
+            libraryIds = libraryIdConfig.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            Console.WriteLine($"[Libraries] Configured: {string.Join(", ", libraryIds)}");
+        }
 
         // Create sync job record
         var syncJob = new DmsSyncJobInfo
@@ -44,97 +58,128 @@ public class Scenario3SyncApi : IScenario
         Console.WriteLine($"[Scenario 3] Sync job created: {syncJob.Id}");
         metrics.Start();
 
+        var totalDocs = 0;
+        var totalFolders = 0;
+        var totalWorkspaces = 0;
+        var totalDocPerms = 0;
+        var totalFolderPerms = 0;
+        var totalLibraryUsers = 0;
+        var libraryStats = new List<string>();
+
         try
         {
-            // Step 1: Crawl documents
-            Console.WriteLine("\n--- Step 1: Crawl Document Profiles ---");
-            var documents = await client.CrawlDocumentsAsync(pageSize, ct);
-            var docEntities = MapDocuments(documents, syncJob.Id, libraryId);
-            db.DmsSyncDocuments.AddRange(docEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {docEntities.Count} documents");
-
-            // Step 2: Crawl document parents
-            Console.WriteLine("\n--- Step 2: Crawl Document Parents ---");
-            var parents = await client.CrawlDocumentParentsAsync(pageSize, ct);
-            UpdateDocumentParents(docEntities, parents, libraryId);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Updated parent IDs for documents");
-
-            // Step 3: Crawl workspaces
-            Console.WriteLine("\n--- Step 3: Crawl Workspaces ---");
-            var workspaces = await client.CrawlWorkspacesAsync(pageSize, ct);
-            var wsEntities = MapWorkspaces(workspaces, syncJob.Id, libraryId);
-            db.DmsSyncFolders.AddRange(wsEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {wsEntities.Count} workspaces");
-
-            // Step 4: Crawl folders
-            Console.WriteLine("\n--- Step 4: Crawl Folders ---");
-            var folders = await client.CrawlFoldersAsync(pageSize, ct);
-            var folderEntities = MapFolders(folders, syncJob.Id, libraryId);
-            db.DmsSyncFolders.AddRange(folderEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {folderEntities.Count} folders");
-
-            // Step 5: Crawl allowed document trustees
-            Console.WriteLine("\n--- Step 5: Crawl Allowed Document Trustees ---");
-            var allowedDocTrustees = await client.CrawlAllowedDocumentTrusteesAsync(pageSize, ct);
-            var allowedDocPermEntities = MapDocumentPermissions(allowedDocTrustees, syncJob.Id);
-            db.DmsSyncDocumentPermissions.AddRange(allowedDocPermEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {allowedDocPermEntities.Count} allowed document permissions");
-
-            // Step 6: Crawl denied document trustees
-            Console.WriteLine("\n--- Step 6: Crawl Denied Document Trustees ---");
-            var deniedDocTrustees = await client.CrawlDeniedDocumentTrusteesAsync(pageSize, ct);
-            var deniedDocPermEntities = MapDocumentPermissions(deniedDocTrustees, syncJob.Id);
-            db.DmsSyncDocumentPermissions.AddRange(deniedDocPermEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {deniedDocPermEntities.Count} denied document permissions");
-
-            // Step 7: Crawl allowed container trustees
-            Console.WriteLine("\n--- Step 7: Crawl Allowed Container Trustees ---");
-            var allowedContainerTrustees = await client.CrawlAllowedContainerTrusteesAsync(pageSize, ct);
-            var allowedFolderPermEntities = MapFolderPermissions(allowedContainerTrustees, syncJob.Id);
-            db.DmsSyncFolderPermissions.AddRange(allowedFolderPermEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {allowedFolderPermEntities.Count} allowed container permissions");
-
-            // Step 8: Crawl denied container trustees
-            Console.WriteLine("\n--- Step 8: Crawl Denied Container Trustees ---");
-            var deniedContainerTrustees = await client.CrawlDeniedContainerTrusteesAsync(pageSize, ct);
-            var deniedFolderPermEntities = MapFolderPermissions(deniedContainerTrustees, syncJob.Id);
-            db.DmsSyncFolderPermissions.AddRange(deniedFolderPermEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {deniedFolderPermEntities.Count} denied container permissions");
-
-            // Step 9a: Crawl global users
-            Console.WriteLine("\n--- Step 9a: Crawl Global Users ---");
-            var globalUsers = await client.CrawlGlobalUsersAsync(pageSize, ct);
+            // Crawl global users first (not library-scoped)
+            Console.WriteLine("\n--- Crawl Global Users ---");
+            var globalClient = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, libraryIds[0], metrics, maxRecords);
+            var globalUsers = await globalClient.CrawlGlobalUsersAsync(pageSize, ct);
             var globalUserEntities = MapUsers(globalUsers, syncJob.Id);
             db.DmsSyncJobUsers.AddRange(globalUserEntities);
             await db.SaveChangesAsync(ct);
             Console.WriteLine($"[DB] Saved {globalUserEntities.Count} global users");
 
-            // Step 9b: Crawl library users
-            Console.WriteLine("\n--- Step 9b: Crawl Library Users ---");
-            var libraryUsers = await client.CrawlLibraryUsersAsync(pageSize, ct);
-            Console.WriteLine($"[Info] Library users: {libraryUsers.Count} (not saved separately — for comparison)");
+            // Crawl each library
+            foreach (var libraryId in libraryIds)
+            {
+                Console.WriteLine($"\n========== Library: {libraryId} ==========");
+                var client = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, libraryId, metrics, maxRecords);
 
-            // Step 10: Crawl groups + members
-            Console.WriteLine("\n--- Step 10: Crawl Groups & Members ---");
-            var groups = await client.CrawlGroupsAsync(pageSize, ct);
-            var groupEntities = MapCabinetGroups(groups, syncJob.Id, libraryId);
-            db.DmsSyncJobCabinetGroups.AddRange(groupEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {groupEntities.Count} cabinet groups");
+                // Step 1: Crawl documents
+                Console.WriteLine("\n--- Step 1: Crawl Document Profiles ---");
+                var documents = await client.CrawlDocumentsAsync(pageSize, ct);
+                var docEntities = MapDocuments(documents, syncJob.Id, libraryId);
+                db.DmsSyncDocuments.AddRange(docEntities);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Saved {docEntities.Count} documents");
+                totalDocs += docEntities.Count;
 
-            var groupMembers = await client.CrawlGroupMembersAsync(pageSize, ct);
-            var memberEntities = MapGroupMembers(groupMembers, syncJob.Id);
-            db.DmsSyncJobGroupMembers.AddRange(memberEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {memberEntities.Count} group members");
+                // Step 2: Crawl document parents
+                Console.WriteLine("\n--- Step 2: Crawl Document Parents ---");
+                var parents = await client.CrawlDocumentParentsAsync(pageSize, ct);
+                UpdateDocumentParents(docEntities, parents, libraryId);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Updated parent IDs for documents");
+
+                // Step 3: Crawl workspaces
+                Console.WriteLine("\n--- Step 3: Crawl Workspaces ---");
+                var workspaces = await client.CrawlWorkspacesAsync(pageSize, ct);
+                var wsEntities = MapWorkspaces(workspaces, syncJob.Id, libraryId);
+                db.DmsSyncFolders.AddRange(wsEntities);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Saved {wsEntities.Count} workspaces");
+                totalWorkspaces += wsEntities.Count;
+
+                // Step 4: Crawl folders
+                Console.WriteLine("\n--- Step 4: Crawl Folders ---");
+                var folders = await client.CrawlFoldersAsync(pageSize, ct);
+                var folderEntities = MapFolders(folders, syncJob.Id, libraryId);
+                db.DmsSyncFolders.AddRange(folderEntities);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Saved {folderEntities.Count} folders");
+                totalFolders += folderEntities.Count;
+
+                // Step 5: Crawl allowed document trustees
+                Console.WriteLine("\n--- Step 5: Crawl Allowed Document Trustees ---");
+                var allowedDocTrustees = await client.CrawlAllowedDocumentTrusteesAsync(pageSize, ct);
+                var allowedDocPermEntities = MapDocumentPermissions(allowedDocTrustees, syncJob.Id);
+                db.DmsSyncDocumentPermissions.AddRange(allowedDocPermEntities);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Saved {allowedDocPermEntities.Count} allowed document permissions");
+                totalDocPerms += allowedDocPermEntities.Count;
+
+                // Step 6: Crawl denied document trustees
+                Console.WriteLine("\n--- Step 6: Crawl Denied Document Trustees ---");
+                var deniedDocTrustees = await client.CrawlDeniedDocumentTrusteesAsync(pageSize, ct);
+                var deniedDocPermEntities = MapDocumentPermissions(deniedDocTrustees, syncJob.Id);
+                db.DmsSyncDocumentPermissions.AddRange(deniedDocPermEntities);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Saved {deniedDocPermEntities.Count} denied document permissions");
+                totalDocPerms += deniedDocPermEntities.Count;
+
+                // Step 7: Crawl allowed container trustees
+                Console.WriteLine("\n--- Step 7: Crawl Allowed Container Trustees ---");
+                var allowedContainerTrustees = await client.CrawlAllowedContainerTrusteesAsync(pageSize, ct);
+                var allowedFolderPermEntities = MapFolderPermissions(allowedContainerTrustees, syncJob.Id);
+                db.DmsSyncFolderPermissions.AddRange(allowedFolderPermEntities);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Saved {allowedFolderPermEntities.Count} allowed container permissions");
+                totalFolderPerms += allowedFolderPermEntities.Count;
+
+                // Step 8: Crawl denied container trustees
+                Console.WriteLine("\n--- Step 8: Crawl Denied Container Trustees ---");
+                var deniedContainerTrustees = await client.CrawlDeniedContainerTrusteesAsync(pageSize, ct);
+                var deniedFolderPermEntities = MapFolderPermissions(deniedContainerTrustees, syncJob.Id);
+                db.DmsSyncFolderPermissions.AddRange(deniedFolderPermEntities);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Saved {deniedFolderPermEntities.Count} denied container permissions");
+                totalFolderPerms += deniedFolderPermEntities.Count;
+
+                // Step 9: Crawl library users (for comparison)
+                Console.WriteLine("\n--- Step 9: Crawl Library Users ---");
+                var libraryUsers = await client.CrawlLibraryUsersAsync(pageSize, ct);
+                Console.WriteLine($"[Info] Library users for {libraryId}: {libraryUsers.Count}");
+                totalLibraryUsers += libraryUsers.Count;
+
+                // Step 10: Crawl groups + members
+                Console.WriteLine("\n--- Step 10: Crawl Groups & Members ---");
+                var groups = await client.CrawlGroupsAsync(pageSize, ct);
+                var groupEntities = MapCabinetGroups(groups, syncJob.Id, libraryId);
+                db.DmsSyncJobCabinetGroups.AddRange(groupEntities);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Saved {groupEntities.Count} cabinet groups");
+
+                var groupMembers = await client.CrawlGroupMembersAsync(pageSize, ct);
+                var memberEntities = MapGroupMembers(groupMembers, syncJob.Id);
+                db.DmsSyncJobGroupMembers.AddRange(memberEntities);
+                await db.SaveChangesAsync(ct);
+                Console.WriteLine($"[DB] Saved {memberEntities.Count} group members");
+
+                // Per-library stats
+                var libDocPerms = allowedDocPermEntities.Count + deniedDocPermEntities.Count;
+                var libFolderPerms = allowedFolderPermEntities.Count + deniedFolderPermEntities.Count;
+                libraryStats.Add($"{libraryId}: docs={docEntities.Count}, workspaces={wsEntities.Count}, " +
+                    $"folders={folderEntities.Count}, docPerms={libDocPerms}, folderPerms={libFolderPerms}, " +
+                    $"libUsers={libraryUsers.Count}, groups={groupEntities.Count}, groupMembers={memberEntities.Count}");
+            }
 
             // Update sync job
             syncJob.SyncJobState = 128; // Completed
@@ -145,11 +190,12 @@ public class Scenario3SyncApi : IScenario
             metrics.Stop();
 
             // Save benchmark run
+            var librariesCrawled = string.Join(", ", libraryIds);
             var run = new BenchmarkRun
             {
                 RunId = metrics.RunId,
                 Scenario = Name,
-                Library = libraryId,
+                Library = librariesCrawled,
                 StartTime = syncJob.StartedAt!.Value,
                 EndTime = syncJob.FinishedAt!.Value,
                 ElapsedSeconds = metrics.ElapsedSeconds,
@@ -163,15 +209,15 @@ public class Scenario3SyncApi : IScenario
                 CrawlDeniedContainerTrusteeCalls = metrics.GetApiCallCount("crawl_denied_container_trustees"),
                 TokenRefreshes = authClient.TokenRefreshCount,
                 TotalApiCalls = metrics.TotalApiCalls,
-                DocumentsDiscovered = docEntities.Count,
-                FoldersDiscovered = folderEntities.Count,
-                WorkspacesDiscovered = wsEntities.Count,
-                PermissionRecords = allowedDocPermEntities.Count + deniedDocPermEntities.Count
-                    + allowedFolderPermEntities.Count + deniedFolderPermEntities.Count,
+                DocumentsDiscovered = totalDocs,
+                FoldersDiscovered = totalFolders,
+                WorkspacesDiscovered = totalWorkspaces,
+                PermissionRecords = totalDocPerms + totalFolderPerms,
                 PeakMemoryMb = metrics.PeakMemoryMb,
-                Notes = $"Library={libraryId}, PageSize={pageSize}, MaxRecords={maxRecords}, " +
-                    $"FullCrawl={maxRecords == 0}, AllLibraries=false, " +
-                    $"GlobalUsers={globalUserEntities.Count}, LibraryUsers={libraryUsers.Count}"
+                Notes = $"Libraries={librariesCrawled}, PageSize={pageSize}, MaxRecords={maxRecords}, " +
+                    $"FullCrawl={maxRecords == 0}, AllLibraries={libraryIdConfig == "*"}, " +
+                    $"GlobalUsers={globalUserEntities.Count}, LibraryUsers={totalLibraryUsers} | " +
+                    string.Join(" | ", libraryStats)
             };
             db.BenchmarkRuns.Add(run);
             await db.SaveChangesAsync(ct);
