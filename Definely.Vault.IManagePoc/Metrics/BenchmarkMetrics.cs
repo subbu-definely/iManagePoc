@@ -6,7 +6,9 @@ public class BenchmarkMetrics
 {
     private readonly Stopwatch _stopwatch = new();
     private readonly Dictionary<string, int> _apiCalls = new();
+    private readonly List<(string Endpoint, int Remaining)> _rateLimitLog = new();
     private long _peakMemory;
+    public int LowestRateLimitRemaining { get; private set; } = int.MaxValue;
 
     public string RunId { get; } = $"{DateTime.UtcNow:yyyyMMdd-HHmmss}";
 
@@ -47,6 +49,13 @@ public class BenchmarkMetrics
             _peakMemory = current;
     }
 
+    public void LogRateLimitInfo(string endpoint, int remaining)
+    {
+        _rateLimitLog.Add((endpoint, remaining));
+        if (remaining < LowestRateLimitRemaining)
+            LowestRateLimitRemaining = remaining;
+    }
+
     public void PrintSummary(string scenario)
     {
         Console.WriteLine();
@@ -55,6 +64,8 @@ public class BenchmarkMetrics
         Console.WriteLine($"Elapsed:        {Elapsed:hh\\:mm\\:ss\\.fff}");
         Console.WriteLine($"Total API calls: {TotalApiCalls}");
         Console.WriteLine($"Peak memory:    {PeakMemoryMb:F1} MB");
+        if (LowestRateLimitRemaining < int.MaxValue)
+            Console.WriteLine($"Lowest rate limit remaining: {LowestRateLimitRemaining}");
         Console.WriteLine();
         Console.WriteLine("API call breakdown:");
         foreach (var (callType, count) in _apiCalls.OrderByDescending(x => x.Value))

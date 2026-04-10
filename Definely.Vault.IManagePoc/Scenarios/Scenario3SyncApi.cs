@@ -30,6 +30,14 @@ public class Scenario3SyncApi : IScenario
         else
             Console.WriteLine($"[Config] No record limit — full crawl, PageSize: {pageSize}");
 
+        // Verify access
+        var verifyClient = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, "verify", metrics, maxRecords);
+        if (!await verifyClient.VerifyAccessAsync(ct))
+        {
+            Console.WriteLine("[Error] Sync API access verification failed. Aborting.");
+            return;
+        }
+
         // Resolve library list
         List<string> libraryIds;
         if (libraryIdConfig == "*")
