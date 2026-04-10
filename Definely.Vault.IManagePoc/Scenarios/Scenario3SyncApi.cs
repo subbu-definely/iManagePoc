@@ -4,6 +4,7 @@ using Definely.Vault.IManagePoc.Client;
 using Definely.Vault.IManagePoc.Data;
 using Definely.Vault.IManagePoc.Data.Entities;
 using Definely.Vault.IManagePoc.Metrics;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 
 namespace Definely.Vault.IManagePoc.Scenarios;
@@ -54,16 +55,72 @@ public class Scenario3SyncApi : IScenario
             Console.WriteLine($"[Libraries] Configured: {string.Join(", ", libraryIds)}");
         }
 
-        // Create sync job record
-        var syncJob = new DmsSyncJobInfo
-        {
-            SyncJobState = 10, // Created
-            StartedAt = DateTimeOffset.UtcNow
-        };
-        db.DmsSyncJobInfos.Add(syncJob);
-        await db.SaveChangesAsync(ct);
+        // Check for incomplete sync job to resume
+        var existingJob = await db.DmsSyncJobInfos
+            .Include(j => j.CrawlProgress)
+            .Where(j => j.SyncJobState != 128 && j.SyncJobState != 256) // Not Completed or Error
+            .OrderByDescending(j => j.CreatedAt)
+            .FirstOrDefaultAsync(ct);
 
-        Console.WriteLine($"[Scenario 3] Sync job created: {syncJob.Id}");
+        DmsSyncJobInfo syncJob;
+        bool isResume = false;
+
+        if (existingJob != null)
+        {
+            var jobAge = DateTimeOffset.UtcNow - existingJob.CreatedAt;
+            var completedEndpoints = existingJob.CrawlProgress.Count(p => p.IsComplete);
+            var totalEndpoints = existingJob.CrawlProgress.Count;
+
+            Console.WriteLine($"\n[Resume] Found incomplete sync job:");
+            Console.WriteLine($"  Job ID:    {existingJob.Id}");
+            Console.WriteLine($"  Created:   {existingJob.CreatedAt:g} ({jobAge.TotalHours:F1} hours ago)");
+            Console.WriteLine($"  Progress:  {completedEndpoints}/{totalEndpoints} endpoints complete");
+
+            if (jobAge.TotalHours > 1)
+                Console.WriteLine($"  [Warning] Job is over 1 hour old — cursors may have expired");
+
+            Console.WriteLine();
+            Console.WriteLine("  r - Resume from where it stopped");
+            Console.WriteLine("  n - Start a new run (abandon this job)");
+            Console.WriteLine("  q - Quit (do nothing)");
+            Console.Write("> ");
+
+            var answer = Console.ReadLine()?.Trim().ToLower();
+
+            switch (answer)
+            {
+                case "r":
+                    syncJob = existingJob;
+                    isResume = true;
+                    Console.WriteLine($"[Resume] Resuming sync job {syncJob.Id}");
+                    break;
+                case "n":
+                    existingJob.SyncJobState = 256;
+                    existingJob.ErrorDetails = "Abandoned — new run started";
+                    existingJob.FinishedAt = DateTimeOffset.UtcNow;
+                    await db.SaveChangesAsync(ct);
+
+                    syncJob = new DmsSyncJobInfo { SyncJobState = 10, StartedAt = DateTimeOffset.UtcNow };
+                    db.DmsSyncJobInfos.Add(syncJob);
+                    await db.SaveChangesAsync(ct);
+                    Console.WriteLine($"[Scenario 3] New sync job created: {syncJob.Id}");
+                    break;
+                case "q":
+                    Console.WriteLine("[Quit] No action taken.");
+                    return;
+                default:
+                    Console.WriteLine("[Quit] Invalid selection — no action taken.");
+                    return;
+            }
+        }
+        else
+        {
+            syncJob = new DmsSyncJobInfo { SyncJobState = 10, StartedAt = DateTimeOffset.UtcNow };
+            db.DmsSyncJobInfos.Add(syncJob);
+            await db.SaveChangesAsync(ct);
+            Console.WriteLine($"[Scenario 3] Sync job created: {syncJob.Id}");
+        }
+
         metrics.Start();
 
         var totalDocs = 0;
@@ -72,18 +129,29 @@ public class Scenario3SyncApi : IScenario
         var totalDocPerms = 0;
         var totalFolderPerms = 0;
         var totalLibraryUsers = 0;
+        var totalGlobalUsers = 0;
         var libraryStats = new List<string>();
 
         try
         {
-            // Crawl global users first (not library-scoped)
-            Console.WriteLine("\n--- Crawl Global Users ---");
-            var globalClient = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, libraryIds[0], metrics, maxRecords);
-            var globalUsers = await globalClient.CrawlGlobalUsersAsync(pageSize, ct);
-            var globalUserEntities = MapUsers(globalUsers, syncJob.Id);
-            db.DmsSyncJobUsers.AddRange(globalUserEntities);
-            await db.SaveChangesAsync(ct);
-            Console.WriteLine($"[DB] Saved {globalUserEntities.Count} global users");
+            // Crawl global users (not library-scoped)
+            await CrawlEndpointWithProgressAsync(db, syncJob.Id, "global", "crawl_global_users",
+                async (resumeCursor, resumeTotal) =>
+                {
+                    var client = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, libraryIds[0], metrics, maxRecords);
+                    return await client.CrawlGetWithCallbackAsync(
+                        iManageEndpoints.CrawlGlobalUsers(baseUrl, customerId),
+                        "crawl_global_users", pageSize,
+                        async page =>
+                        {
+                            var entities = MapUsers(page.Items, syncJob.Id);
+                            db.DmsSyncJobUsers.AddRange(entities);
+                            await db.SaveChangesAsync(ct);
+                            await UpdateCrawlProgressAsync(db, syncJob.Id, "global", "crawl_global_users", page.Cursor, page.TotalSoFar, ct);
+                        },
+                        resumeCursor, resumeTotal, ct);
+                }, ct);
+            totalGlobalUsers = await db.DmsSyncJobUsers.CountAsync(u => u.DmsSyncJobInfoId == syncJob.Id, ct);
 
             // Crawl each library
             foreach (var libraryId in libraryIds)
@@ -91,81 +159,178 @@ public class Scenario3SyncApi : IScenario
                 Console.WriteLine($"\n========== Library: {libraryId} ==========");
                 var client = new iManageSyncApiClient(httpClient, authClient, baseUrl, customerId, libraryId, metrics, maxRecords);
 
+                var libDocs = 0;
+                var libWorkspaces = 0;
+                var libFolders = 0;
+                var libDocPerms = 0;
+                var libFolderPerms = 0;
+                var libUsers = 0;
+
                 // Step 1: Crawl documents
                 Console.WriteLine("\n--- Step 1: Crawl Document Profiles ---");
-                var documents = await client.CrawlDocumentsAsync(pageSize, ct);
-                var docEntities = MapDocuments(documents, syncJob.Id, libraryId);
-                db.DmsSyncDocuments.AddRange(docEntities);
-                await db.SaveChangesAsync(ct);
-                Console.WriteLine($"[DB] Saved {docEntities.Count} documents");
-                totalDocs += docEntities.Count;
+                await CrawlEndpointWithProgressAsync(db, syncJob.Id, libraryId, "crawl_documents",
+                    async (resumeCursor, resumeTotal) =>
+                    {
+                        return await client.CrawlPostWithCallbackAsync(
+                            iManageEndpoints.CrawlDocuments(baseUrl, customerId, libraryId),
+                            "crawl_documents", pageSize,
+                            async page =>
+                            {
+                                var entities = MapDocuments(page.Items, syncJob.Id, libraryId);
+                                db.DmsSyncDocuments.AddRange(entities);
+                                await db.SaveChangesAsync(ct);
+                                await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_documents", page.Cursor, page.TotalSoFar, ct);
+                            },
+                            resumeCursor, resumeTotal, ct);
+                    }, ct);
+                libDocs = await db.DmsSyncDocuments.CountAsync(d => d.DmsSyncJobInfoId == syncJob.Id && d.Cabinet == libraryId, ct);
 
                 // Step 2: Crawl document parents
                 Console.WriteLine("\n--- Step 2: Crawl Document Parents ---");
-                var parents = await client.CrawlDocumentParentsAsync(pageSize, ct);
-                UpdateDocumentParents(docEntities, parents, libraryId);
-                await db.SaveChangesAsync(ct);
-                Console.WriteLine($"[DB] Updated parent IDs for documents");
+                await CrawlEndpointWithProgressAsync(db, syncJob.Id, libraryId, "crawl_document_parents",
+                    async (resumeCursor, resumeTotal) =>
+                    {
+                        // Load all docs for this library to update parent IDs
+                        var docs = await db.DmsSyncDocuments
+                            .Where(d => d.DmsSyncJobInfoId == syncJob.Id && d.Cabinet == libraryId)
+                            .ToListAsync(ct);
+                        var docsByNumber = docs.ToDictionary(d => d.DocumentNumber, d => d);
+
+                        return await client.CrawlPostWithCallbackAsync(
+                            iManageEndpoints.CrawlDocumentParents(baseUrl, customerId, libraryId),
+                            "crawl_document_parents", pageSize,
+                            async page =>
+                            {
+                                foreach (var p in page.Items)
+                                {
+                                    var docNum = p.GetProperty("document_number").GetInt32();
+                                    var parentId = p.GetProperty("parent_id").GetString() ?? string.Empty;
+                                    if (docsByNumber.TryGetValue(docNum, out var doc))
+                                        doc.ParentIdsJson = [parentId];
+                                }
+                                await db.SaveChangesAsync(ct);
+                                await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_document_parents", page.Cursor, page.TotalSoFar, ct);
+                            },
+                            resumeCursor, resumeTotal, ct);
+                    }, ct);
 
                 // Step 3: Crawl workspaces
                 Console.WriteLine("\n--- Step 3: Crawl Workspaces ---");
-                var workspaces = await client.CrawlWorkspacesAsync(pageSize, ct);
-                var wsEntities = MapWorkspaces(workspaces, syncJob.Id, libraryId);
-                db.DmsSyncFolders.AddRange(wsEntities);
-                await db.SaveChangesAsync(ct);
-                Console.WriteLine($"[DB] Saved {wsEntities.Count} workspaces");
-                totalWorkspaces += wsEntities.Count;
+                await CrawlEndpointWithProgressAsync(db, syncJob.Id, libraryId, "crawl_workspaces",
+                    async (resumeCursor, resumeTotal) =>
+                    {
+                        return await client.CrawlPostWithCallbackAsync(
+                            iManageEndpoints.CrawlWorkspaces(baseUrl, customerId, libraryId),
+                            "crawl_workspaces", pageSize,
+                            async page =>
+                            {
+                                var entities = MapWorkspaces(page.Items, syncJob.Id, libraryId);
+                                db.DmsSyncFolders.AddRange(entities);
+                                await db.SaveChangesAsync(ct);
+                                await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_workspaces", page.Cursor, page.TotalSoFar, ct);
+                            },
+                            resumeCursor, resumeTotal, ct);
+                    }, ct);
+                libWorkspaces = await db.DmsSyncFolders.CountAsync(f => f.DmsSyncJobInfoId == syncJob.Id && f.Cabinet == libraryId && f.IsWorkspace, ct);
 
                 // Step 4: Crawl folders
                 Console.WriteLine("\n--- Step 4: Crawl Folders ---");
-                var folders = await client.CrawlFoldersAsync(pageSize, ct);
-                var folderEntities = MapFolders(folders, syncJob.Id, libraryId);
-                db.DmsSyncFolders.AddRange(folderEntities);
-                await db.SaveChangesAsync(ct);
-                Console.WriteLine($"[DB] Saved {folderEntities.Count} folders");
-                totalFolders += folderEntities.Count;
+                await CrawlEndpointWithProgressAsync(db, syncJob.Id, libraryId, "crawl_folders",
+                    async (resumeCursor, resumeTotal) =>
+                    {
+                        return await client.CrawlPostWithCallbackAsync(
+                            iManageEndpoints.CrawlFolders(baseUrl, customerId, libraryId),
+                            "crawl_folders", pageSize,
+                            async page =>
+                            {
+                                var entities = MapFolders(page.Items, syncJob.Id, libraryId);
+                                db.DmsSyncFolders.AddRange(entities);
+                                await db.SaveChangesAsync(ct);
+                                await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_folders", page.Cursor, page.TotalSoFar, ct);
+                            },
+                            resumeCursor, resumeTotal, ct);
+                    }, ct);
+                libFolders = await db.DmsSyncFolders.CountAsync(f => f.DmsSyncJobInfoId == syncJob.Id && f.Cabinet == libraryId && !f.IsWorkspace, ct);
 
                 // Step 5: Crawl allowed document trustees
                 Console.WriteLine("\n--- Step 5: Crawl Allowed Document Trustees ---");
-                var allowedDocTrustees = await client.CrawlAllowedDocumentTrusteesAsync(pageSize, ct);
-                var allowedDocPermEntities = MapDocumentPermissions(allowedDocTrustees, syncJob.Id);
-                db.DmsSyncDocumentPermissions.AddRange(allowedDocPermEntities);
-                await db.SaveChangesAsync(ct);
-                Console.WriteLine($"[DB] Saved {allowedDocPermEntities.Count} allowed document permissions");
-                totalDocPerms += allowedDocPermEntities.Count;
+                await CrawlEndpointWithProgressAsync(db, syncJob.Id, libraryId, "crawl_allowed_doc_trustees",
+                    async (resumeCursor, resumeTotal) =>
+                    {
+                        return await client.CrawlPostWithCallbackAsync(
+                            iManageEndpoints.CrawlAllowedDocumentTrustees(baseUrl, customerId, libraryId),
+                            "crawl_allowed_doc_trustees", pageSize,
+                            async page =>
+                            {
+                                var entities = MapDocumentPermissions(page.Items, syncJob.Id);
+                                db.DmsSyncDocumentPermissions.AddRange(entities);
+                                await db.SaveChangesAsync(ct);
+                                await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_allowed_doc_trustees", page.Cursor, page.TotalSoFar, ct);
+                            },
+                            resumeCursor, resumeTotal, ct);
+                    }, ct);
 
                 // Step 6: Crawl denied document trustees
                 Console.WriteLine("\n--- Step 6: Crawl Denied Document Trustees ---");
-                var deniedDocTrustees = await client.CrawlDeniedDocumentTrusteesAsync(pageSize, ct);
-                var deniedDocPermEntities = MapDocumentPermissions(deniedDocTrustees, syncJob.Id);
-                db.DmsSyncDocumentPermissions.AddRange(deniedDocPermEntities);
-                await db.SaveChangesAsync(ct);
-                Console.WriteLine($"[DB] Saved {deniedDocPermEntities.Count} denied document permissions");
-                totalDocPerms += deniedDocPermEntities.Count;
+                await CrawlEndpointWithProgressAsync(db, syncJob.Id, libraryId, "crawl_denied_doc_trustees",
+                    async (resumeCursor, resumeTotal) =>
+                    {
+                        return await client.CrawlPostWithCallbackAsync(
+                            iManageEndpoints.CrawlDeniedDocumentTrustees(baseUrl, customerId, libraryId),
+                            "crawl_denied_doc_trustees", pageSize,
+                            async page =>
+                            {
+                                var entities = MapDocumentPermissions(page.Items, syncJob.Id);
+                                db.DmsSyncDocumentPermissions.AddRange(entities);
+                                await db.SaveChangesAsync(ct);
+                                await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_denied_doc_trustees", page.Cursor, page.TotalSoFar, ct);
+                            },
+                            resumeCursor, resumeTotal, ct);
+                    }, ct);
+                libDocPerms = await db.DmsSyncDocumentPermissions.CountAsync(p => p.DmsSyncJobInfoId == syncJob.Id, ct);
 
                 // Step 7: Crawl allowed container trustees
                 Console.WriteLine("\n--- Step 7: Crawl Allowed Container Trustees ---");
-                var allowedContainerTrustees = await client.CrawlAllowedContainerTrusteesAsync(pageSize, ct);
-                var allowedFolderPermEntities = MapFolderPermissions(allowedContainerTrustees, syncJob.Id);
-                db.DmsSyncFolderPermissions.AddRange(allowedFolderPermEntities);
-                await db.SaveChangesAsync(ct);
-                Console.WriteLine($"[DB] Saved {allowedFolderPermEntities.Count} allowed container permissions");
-                totalFolderPerms += allowedFolderPermEntities.Count;
+                await CrawlEndpointWithProgressAsync(db, syncJob.Id, libraryId, "crawl_allowed_container_trustees",
+                    async (resumeCursor, resumeTotal) =>
+                    {
+                        return await client.CrawlPostWithCallbackAsync(
+                            iManageEndpoints.CrawlAllowedContainerTrustees(baseUrl, customerId, libraryId),
+                            "crawl_allowed_container_trustees", pageSize,
+                            async page =>
+                            {
+                                var entities = MapFolderPermissions(page.Items, syncJob.Id);
+                                db.DmsSyncFolderPermissions.AddRange(entities);
+                                await db.SaveChangesAsync(ct);
+                                await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_allowed_container_trustees", page.Cursor, page.TotalSoFar, ct);
+                            },
+                            resumeCursor, resumeTotal, ct);
+                    }, ct);
 
                 // Step 8: Crawl denied container trustees
                 Console.WriteLine("\n--- Step 8: Crawl Denied Container Trustees ---");
-                var deniedContainerTrustees = await client.CrawlDeniedContainerTrusteesAsync(pageSize, ct);
-                var deniedFolderPermEntities = MapFolderPermissions(deniedContainerTrustees, syncJob.Id);
-                db.DmsSyncFolderPermissions.AddRange(deniedFolderPermEntities);
-                await db.SaveChangesAsync(ct);
-                Console.WriteLine($"[DB] Saved {deniedFolderPermEntities.Count} denied container permissions");
-                totalFolderPerms += deniedFolderPermEntities.Count;
+                await CrawlEndpointWithProgressAsync(db, syncJob.Id, libraryId, "crawl_denied_container_trustees",
+                    async (resumeCursor, resumeTotal) =>
+                    {
+                        return await client.CrawlPostWithCallbackAsync(
+                            iManageEndpoints.CrawlDeniedContainerTrustees(baseUrl, customerId, libraryId),
+                            "crawl_denied_container_trustees", pageSize,
+                            async page =>
+                            {
+                                var entities = MapFolderPermissions(page.Items, syncJob.Id);
+                                db.DmsSyncFolderPermissions.AddRange(entities);
+                                await db.SaveChangesAsync(ct);
+                                await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_denied_container_trustees", page.Cursor, page.TotalSoFar, ct);
+                            },
+                            resumeCursor, resumeTotal, ct);
+                    }, ct);
+                libFolderPerms = await db.DmsSyncFolderPermissions.CountAsync(p => p.DmsSyncJobInfoId == syncJob.Id, ct);
 
-                // Step 9: Crawl library users (for comparison)
+                // Step 9: Crawl library users (informational)
                 Console.WriteLine("\n--- Step 9: Crawl Library Users ---");
-                var libraryUsers = await client.CrawlLibraryUsersAsync(pageSize, ct);
-                Console.WriteLine($"[Info] Library users for {libraryId}: {libraryUsers.Count}");
-                totalLibraryUsers += libraryUsers.Count;
+                var libUsersList = await client.CrawlLibraryUsersAsync(pageSize, ct);
+                libUsers = libUsersList.Count;
+                Console.WriteLine($"[Info] Library users for {libraryId}: {libUsers}");
 
                 // Step 10: Crawl groups + members
                 Console.WriteLine("\n--- Step 10: Crawl Groups & Members ---");
@@ -182,11 +347,16 @@ public class Scenario3SyncApi : IScenario
                 Console.WriteLine($"[DB] Saved {memberEntities.Count} group members");
 
                 // Per-library stats
-                var libDocPerms = allowedDocPermEntities.Count + deniedDocPermEntities.Count;
-                var libFolderPerms = allowedFolderPermEntities.Count + deniedFolderPermEntities.Count;
-                libraryStats.Add($"{libraryId}: docs={docEntities.Count}, workspaces={wsEntities.Count}, " +
-                    $"folders={folderEntities.Count}, docPerms={libDocPerms}, folderPerms={libFolderPerms}, " +
-                    $"libUsers={libraryUsers.Count}, groups={groupEntities.Count}, groupMembers={memberEntities.Count}");
+                libraryStats.Add($"{libraryId}: docs={libDocs}, workspaces={libWorkspaces}, " +
+                    $"folders={libFolders}, docPerms={libDocPerms}, folderPerms={libFolderPerms}, " +
+                    $"libUsers={libUsers}, groups={groupEntities.Count}, groupMembers={memberEntities.Count}");
+
+                totalDocs += libDocs;
+                totalWorkspaces += libWorkspaces;
+                totalFolders += libFolders;
+                totalDocPerms += libDocPerms;
+                totalFolderPerms += libFolderPerms;
+                totalLibraryUsers += libUsers;
             }
 
             // Update sync job
@@ -223,8 +393,8 @@ public class Scenario3SyncApi : IScenario
                 PermissionRecords = totalDocPerms + totalFolderPerms,
                 PeakMemoryMb = metrics.PeakMemoryMb,
                 Notes = $"Libraries={librariesCrawled}, PageSize={pageSize}, MaxRecords={maxRecords}, " +
-                    $"FullCrawl={maxRecords == 0}, AllLibraries={libraryIdConfig == "*"}, " +
-                    $"GlobalUsers={globalUserEntities.Count}, LibraryUsers={totalLibraryUsers} | " +
+                    $"FullCrawl={maxRecords == 0}, AllLibraries={libraryIdConfig == "*"}, Resumed={isResume}, " +
+                    $"GlobalUsers={totalGlobalUsers}, LibraryUsers={totalLibraryUsers} | " +
                     string.Join(" | ", libraryStats)
             };
             db.BenchmarkRuns.Add(run);
@@ -243,14 +413,82 @@ public class Scenario3SyncApi : IScenario
 
             try
             {
-                syncJob.SyncJobState = 256; // Error
+                syncJob.SyncJobState = 20; // InProgress but interrupted — can be resumed
                 syncJob.ErrorDetails = ex.InnerException?.Message ?? ex.Message;
-                syncJob.FinishedAt = DateTimeOffset.UtcNow;
+                syncJob.LastModifiedAt = DateTimeOffset.UtcNow;
                 await db.SaveChangesAsync(ct);
+                Console.WriteLine("[Info] Sync job saved as resumable — run again to continue from where it stopped");
             }
             catch { /* ignore save errors during error handling */ }
         }
     }
+
+    // ==================== Progress Tracking ====================
+
+    private static async Task CrawlEndpointWithProgressAsync(PocDbContext db, Guid syncJobId,
+        string libraryId, string endpointName,
+        Func<string?, int, Task<int>> crawlAction, CancellationToken ct)
+    {
+        // Check if this endpoint is already complete
+        var progress = await db.DmsSyncCrawlProgress
+            .FirstOrDefaultAsync(p => p.DmsSyncJobInfoId == syncJobId
+                && p.LibraryId == libraryId
+                && p.EndpointName == endpointName, ct);
+
+        if (progress?.IsComplete == true)
+        {
+            Console.WriteLine($"[Progress] {endpointName} ({libraryId}): already complete ({progress.RecordsSaved} records) — skipping");
+            return;
+        }
+
+        var resumeCursor = progress?.LastCursor;
+        var resumeTotal = progress?.RecordsSaved ?? 0;
+
+        // Create progress record if it doesn't exist
+        if (progress == null)
+        {
+            progress = new DmsSyncCrawlProgress
+            {
+                DmsSyncJobInfoId = syncJobId,
+                LibraryId = libraryId,
+                EndpointName = endpointName
+            };
+            db.DmsSyncCrawlProgress.Add(progress);
+            await db.SaveChangesAsync(ct);
+        }
+
+        // Run the crawl — the callback updates DB per page
+        var totalRecords = await crawlAction(resumeCursor, resumeTotal);
+
+        // Mark as complete
+        progress.IsComplete = true;
+        progress.RecordsSaved = totalRecords;
+        progress.LastUpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Helper to update crawl progress cursor after each page is saved.
+    /// Call this inside the per-page callback after saving entities.
+    /// </summary>
+    private static async Task UpdateCrawlProgressAsync(PocDbContext db, Guid syncJobId,
+        string libraryId, string endpointName, string? cursor, int totalRecords, CancellationToken ct)
+    {
+        var progress = await db.DmsSyncCrawlProgress
+            .FirstOrDefaultAsync(p => p.DmsSyncJobInfoId == syncJobId
+                && p.LibraryId == libraryId
+                && p.EndpointName == endpointName, ct);
+
+        if (progress != null)
+        {
+            progress.LastCursor = cursor;
+            progress.RecordsSaved = totalRecords;
+            progress.LastUpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    // ==================== Mapping Methods ====================
 
     private static List<DmsSyncDocument> MapDocuments(List<JsonElement> documents, Guid jobId, string libraryId)
     {
@@ -277,25 +515,6 @@ public class Scenario3SyncApi : IScenario
         }).ToList();
     }
 
-    private static void UpdateDocumentParents(List<DmsSyncDocument> documents, List<JsonElement> parents, string libraryId)
-    {
-        var parentMap = new Dictionary<int, string>();
-        foreach (var p in parents)
-        {
-            var docNum = p.GetProperty("document_number").GetInt32();
-            var parentId = p.GetProperty("parent_id").GetString() ?? string.Empty;
-            parentMap[docNum] = parentId;
-        }
-
-        foreach (var doc in documents)
-        {
-            if (parentMap.TryGetValue(doc.DocumentNumber, out var parentId))
-            {
-                doc.ParentIdsJson = [parentId];
-            }
-        }
-    }
-
     private static List<DmsSyncFolder> MapWorkspaces(List<JsonElement> workspaces, Guid jobId, string libraryId)
     {
         return workspaces.Select(w => new DmsSyncFolder
@@ -304,7 +523,7 @@ public class Scenario3SyncApi : IScenario
             DmsId = w.GetProperty("id").GetString() ?? string.Empty,
             ParentDmsId = null,
             Name = w.GetProperty("name").GetString() ?? string.Empty,
-            Source = 3, // IManage
+            Source = 3,
             Cabinet = libraryId,
             IsWorkspace = true,
             IsRootElement = false,
@@ -322,7 +541,7 @@ public class Scenario3SyncApi : IScenario
             DmsId = f.GetProperty("id").GetString() ?? string.Empty,
             ParentDmsId = f.TryGetProperty("parent_id", out var pid) ? pid.GetString() : null,
             Name = f.TryGetProperty("name", out var name) ? name.GetString() ?? string.Empty : string.Empty,
-            Source = 3, // IManage
+            Source = 3,
             Cabinet = libraryId,
             IsWorkspace = false,
             IsRootElement = false,
@@ -356,7 +575,6 @@ public class Scenario3SyncApi : IScenario
         var grouped = new Dictionary<string, List<JsonElement>>();
         foreach (var t in trustees)
         {
-            // Container trustees may use "container_id" or similar — adapt based on actual response
             var containerId = string.Empty;
             if (t.TryGetProperty("container_id", out var cid))
                 containerId = cid.GetString() ?? string.Empty;
@@ -423,6 +641,4 @@ public class Scenario3SyncApi : IScenario
             MembersJson = JsonSerializer.Serialize(g.Value)
         }).ToList();
     }
-
-    private int DocumentNumber { get; set; }
 }

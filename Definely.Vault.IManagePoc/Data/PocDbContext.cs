@@ -15,6 +15,7 @@ public class PocDbContext : DbContext
     public DbSet<DmsSyncJobUser> DmsSyncJobUsers { get; set; } = null!;
     public DbSet<DmsSyncJobCabinetGroup> DmsSyncJobCabinetGroups { get; set; } = null!;
     public DbSet<DmsSyncJobGroupMember> DmsSyncJobGroupMembers { get; set; } = null!;
+    public DbSet<DmsSyncCrawlProgress> DmsSyncCrawlProgress { get; set; } = null!;
     public DbSet<BenchmarkRun> BenchmarkRuns { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -116,6 +117,18 @@ public class PocDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => x.DmsSyncJobInfoId);
             e.Property(x => x.MembersJson).HasColumnType("jsonb");
+        });
+
+        // DmsSyncCrawlProgress
+        modelBuilder.Entity<DmsSyncCrawlProgress>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.HasOne(x => x.DmsSyncJobInfo)
+                .WithMany(x => x.CrawlProgress)
+                .HasForeignKey(x => x.DmsSyncJobInfoId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.DmsSyncJobInfoId, x.LibraryId, x.EndpointName }).IsUnique();
         });
 
         // BenchmarkRun (POC-only)

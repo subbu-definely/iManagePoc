@@ -20,4 +20,5 @@ public class DmsSyncJobInfo
     public ICollection<DmsSyncJobUser> DmsSyncJobUsers { get; set; } = [];
     public ICollection<DmsSyncJobCabinetGroup> DmsSyncJobCabinetGroups { get; set; } = [];
     public ICollection<DmsSyncJobGroupMember> DmsSyncJobGroupMembers { get; set; } = [];
+    public ICollection<DmsSyncCrawlProgress> CrawlProgress { get; set; } = [];
 }

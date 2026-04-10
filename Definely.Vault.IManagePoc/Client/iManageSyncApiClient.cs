@@ -180,10 +180,24 @@ public class iManageSyncApiClient
 
     // ==================== Core Crawl Methods ====================
 
-    private async Task<List<JsonElement>> CrawlPostAsync(string url, string metricName, int pageSize, CancellationToken ct)
+    /// <summary>
+    /// Crawl result for a single page, including the cursor for resume support.
+    /// </summary>
+    public record CrawlPageResult(List<JsonElement> Items, string? Cursor, int PageNumber, int TotalSoFar);
+
+    /// <summary>
+    /// POST-based crawl with per-page callback for incremental saving.
+    /// onPage is called after each page is fetched. resumeCursor allows resuming from a previous cursor.
+    /// </summary>
+    public async Task<int> CrawlPostWithCallbackAsync(string url, string metricName, int pageSize,
+        Func<CrawlPageResult, Task> onPage, string? resumeCursor = null, int resumeTotal = 0, CancellationToken ct = default)
     {
-        var allResults = new List<JsonElement>();
-        string? cursor = null;
+        var totalRecords = resumeTotal;
+        var pageNumber = resumeTotal > 0 ? (resumeTotal / pageSize) + 1 : 1;
+        string? cursor = resumeCursor;
+
+        if (resumeCursor != null)
+            Console.WriteLine($"[Crawl] {metricName}: resuming from cursor (page ~{pageNumber}, {resumeTotal} records already saved)");
 
         while (true)
         {
@@ -210,29 +224,53 @@ public class iManageSyncApiClient
             var dataArray = doc.RootElement.GetProperty("data");
             var count = dataArray.GetArrayLength();
 
+            var pageItems = new List<JsonElement>();
             foreach (var item in dataArray.EnumerateArray())
-                allResults.Add(item.Clone());
+                pageItems.Add(item.Clone());
 
-            if (count < pageSize || !doc.RootElement.TryGetProperty("cursor", out var cursorElement))
+            totalRecords += count;
+
+            // Get cursor before calling callback
+            string? nextCursor = null;
+            if (doc.RootElement.TryGetProperty("cursor", out var cursorElement))
+                nextCursor = cursorElement.GetString();
+
+            // Call the per-page callback — this is where the caller saves to DB
+            await onPage(new CrawlPageResult(pageItems, nextCursor, pageNumber, totalRecords));
+
+            Console.WriteLine($"[Crawl] {metricName}: page {pageNumber} — {count} records ({totalRecords} total)");
+
+            if (count < pageSize || nextCursor == null)
                 break;
 
-            if (_maxRecords > 0 && allResults.Count >= _maxRecords)
+            if (_maxRecords > 0 && totalRecords >= _maxRecords)
             {
                 Console.WriteLine($"[Crawl] {metricName}: reached max records limit ({_maxRecords})");
                 break;
             }
 
-            cursor = cursorElement.GetString();
+            cursor = nextCursor;
+            pageNumber++;
         }
 
-        Console.WriteLine($"[Crawl] {metricName}: {allResults.Count} records");
-        return allResults;
+        Console.WriteLine($"[Crawl] {metricName}: complete — {totalRecords} records");
+        return totalRecords;
     }
 
-    private async Task<List<JsonElement>> CrawlGetAsync(string baseEndpointUrl, string metricName, int pageSize, CancellationToken ct)
+    /// <summary>
+    /// GET-based crawl with per-page callback for incremental saving.
+    /// </summary>
+    public async Task<int> CrawlGetWithCallbackAsync(string baseEndpointUrl, string metricName, int pageSize,
+        Func<CrawlPageResult, Task> onPage, string? resumeCursor = null, int resumeTotal = 0, CancellationToken ct = default)
     {
-        var allResults = new List<JsonElement>();
-        var url = $"{baseEndpointUrl}?limit={pageSize}";
+        var totalRecords = resumeTotal;
+        var pageNumber = resumeTotal > 0 ? (resumeTotal / pageSize) + 1 : 1;
+        var url = resumeCursor != null
+            ? $"{baseEndpointUrl}?limit={pageSize}&cursor={resumeCursor}"
+            : $"{baseEndpointUrl}?limit={pageSize}";
+
+        if (resumeCursor != null)
+            Console.WriteLine($"[Crawl] {metricName}: resuming from cursor (page ~{pageNumber}, {resumeTotal} records already saved)");
 
         while (true)
         {
@@ -250,22 +288,61 @@ public class iManageSyncApiClient
             var json = await response.Content.ReadAsStringAsync(ct);
             var doc = JsonDocument.Parse(json);
 
-            if (doc.RootElement.TryGetProperty("data", out var data))
-            {
-                foreach (var item in data.EnumerateArray())
-                    allResults.Add(item.Clone());
+            if (!doc.RootElement.TryGetProperty("data", out var data))
+                break;
 
-                if (doc.RootElement.TryGetProperty("cursor", out var cursor) && data.GetArrayLength() >= pageSize)
-                {
-                    if (_maxRecords > 0 && allResults.Count >= _maxRecords) break;
-                    url = $"{baseEndpointUrl}?limit={pageSize}&cursor={cursor.GetString()}";
-                }
-                else break;
+            var pageItems = new List<JsonElement>();
+            foreach (var item in data.EnumerateArray())
+                pageItems.Add(item.Clone());
+
+            totalRecords += pageItems.Count;
+
+            string? nextCursor = null;
+            if (doc.RootElement.TryGetProperty("cursor", out var cursor) && data.GetArrayLength() >= pageSize)
+                nextCursor = cursor.GetString();
+
+            await onPage(new CrawlPageResult(pageItems, nextCursor, pageNumber, totalRecords));
+
+            Console.WriteLine($"[Crawl] {metricName}: page {pageNumber} — {pageItems.Count} records ({totalRecords} total)");
+
+            if (nextCursor == null || data.GetArrayLength() < pageSize)
+                break;
+
+            if (_maxRecords > 0 && totalRecords >= _maxRecords)
+            {
+                Console.WriteLine($"[Crawl] {metricName}: reached max records limit ({_maxRecords})");
+                break;
             }
-            else break;
+
+            url = $"{baseEndpointUrl}?limit={pageSize}&cursor={nextCursor}";
+            pageNumber++;
         }
 
-        Console.WriteLine($"[Crawl] {metricName}: {allResults.Count} records");
+        Console.WriteLine($"[Crawl] {metricName}: complete — {totalRecords} records");
+        return totalRecords;
+    }
+
+    /// <summary>
+    /// Convenience: POST-based crawl that returns all results in memory (for small datasets).
+    /// </summary>
+    private async Task<List<JsonElement>> CrawlPostAsync(string url, string metricName, int pageSize, CancellationToken ct)
+    {
+        var allResults = new List<JsonElement>();
+        await CrawlPostWithCallbackAsync(url, metricName, pageSize,
+            page => { allResults.AddRange(page.Items); return Task.CompletedTask; },
+            ct: ct);
+        return allResults;
+    }
+
+    /// <summary>
+    /// Convenience: GET-based crawl that returns all results in memory (for small datasets).
+    /// </summary>
+    private async Task<List<JsonElement>> CrawlGetAsync(string baseEndpointUrl, string metricName, int pageSize, CancellationToken ct)
+    {
+        var allResults = new List<JsonElement>();
+        await CrawlGetWithCallbackAsync(baseEndpointUrl, metricName, pageSize,
+            page => { allResults.AddRange(page.Items); return Task.CompletedTask; },
+            ct: ct);
         return allResults;
     }
 
