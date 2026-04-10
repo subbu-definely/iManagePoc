@@ -185,33 +185,72 @@ public class Scenario3SyncApi : IScenario
                     }, ct);
                 libDocs = await db.DmsSyncDocuments.CountAsync(d => d.DmsSyncJobInfoId == syncJob.Id && d.Cabinet == libraryId, ct);
 
-                // Step 2: Crawl document parents
+                // Step 2: Crawl document parents — two phases: crawl into memory, then batch-update DB
                 Console.WriteLine("\n--- Step 2: Crawl Document Parents ---");
                 await CrawlEndpointWithProgressAsync(db, syncJob.Id, libraryId, "crawl_document_parents",
                     async (resumeCursor, resumeTotal) =>
                     {
-                        // Load all docs for this library to update parent IDs
-                        var docs = await db.DmsSyncDocuments
-                            .Where(d => d.DmsSyncJobInfoId == syncJob.Id && d.Cabinet == libraryId)
-                            .ToListAsync(ct);
-                        var docsByNumber = docs.ToDictionary(d => d.DocumentNumber, d => d);
-
-                        return await client.CrawlPostWithCallbackAsync(
+                        // Phase 1: Crawl all parent mappings into a dictionary (small — just docnum + parentId)
+                        var parentMap = new Dictionary<int, List<string>>();
+                        var totalCrawled = await client.CrawlPostWithCallbackAsync(
                             iManageEndpoints.CrawlDocumentParents(baseUrl, customerId, libraryId),
                             "crawl_document_parents", pageSize,
-                            async page =>
+                            page =>
                             {
                                 foreach (var p in page.Items)
                                 {
                                     var docNum = p.GetProperty("document_number").GetInt32();
                                     var parentId = p.GetProperty("parent_id").GetString() ?? string.Empty;
-                                    if (docsByNumber.TryGetValue(docNum, out var doc))
-                                        doc.ParentIdsJson = [parentId];
+                                    if (!parentMap.ContainsKey(docNum))
+                                        parentMap[docNum] = [];
+                                    if (!parentMap[docNum].Contains(parentId))
+                                        parentMap[docNum].Add(parentId);
                                 }
-                                await db.SaveChangesAsync(ct);
-                                await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_document_parents", page.Cursor, page.TotalSoFar, ct);
+                                return Task.CompletedTask;
                             },
                             resumeCursor, resumeTotal, ct);
+
+                        Console.WriteLine($"[Parents] {parentMap.Count} unique document numbers with parents, applying to DB...");
+
+                        // Phase 2: Load documents in batches and update ParentIdsJson via EF Core
+                        const int updateBatchSize = 500;
+                        var totalDmsDocCount = await db.DmsSyncDocuments
+                            .CountAsync(d => d.DmsSyncJobInfoId == syncJob.Id && d.Cabinet == libraryId, ct);
+                        var processed = 0;
+
+                        while (processed < totalDmsDocCount)
+                        {
+                            var batch = await db.DmsSyncDocuments
+                                .Where(d => d.DmsSyncJobInfoId == syncJob.Id && d.Cabinet == libraryId)
+                                .OrderBy(d => d.Id)
+                                .Skip(processed)
+                                .Take(updateBatchSize)
+                                .ToListAsync(ct);
+
+                            if (batch.Count == 0) break;
+
+                            foreach (var doc in batch)
+                            {
+                                // Extract document number from DmsId (e.g., "Dev!7525.1" → 7525)
+                                var dmsIdParts = doc.DmsId.Split('!');
+                                if (dmsIdParts.Length == 2)
+                                {
+                                    var numPart = dmsIdParts[1].Split('.')[0];
+                                    if (int.TryParse(numPart, out var docNum) && parentMap.TryGetValue(docNum, out var parents))
+                                    {
+                                        doc.ParentIdsJson = parents.ToArray();
+                                    }
+                                }
+                            }
+
+                            await db.SaveChangesAsync(ct);
+                            db.ChangeTracker.Clear(); // Release tracked entities to keep memory flat
+                            processed += batch.Count;
+                            Console.WriteLine($"[Parents] Updated {processed}/{totalDmsDocCount} documents");
+                        }
+
+                        await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_document_parents", null, totalCrawled, ct);
+                        return totalCrawled;
                     }, ct);
 
                 // Step 3: Crawl workspaces

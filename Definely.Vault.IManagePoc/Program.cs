@@ -26,7 +26,7 @@ internal class Program
         Console.WriteLine("[DB] Database ready.");
 
         // Set up auth client
-        var httpClient = new HttpClient();
+        var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
         var authClient = new iManageAuthClient(
             httpClient,
             imanageConfig["AuthUrl"]!,

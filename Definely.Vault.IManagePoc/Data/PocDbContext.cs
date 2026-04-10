@@ -40,6 +40,7 @@ public class PocDbContext : DbContext
             e.Property(x => x.ParentIdsJson).HasColumnType("text[]");
             e.Property(x => x.AuthorsJson).HasColumnType("text[]");
             e.Ignore(x => x.DocumentNumber);
+            e.HasIndex(x => x.DmsId);
         });
 
         // DmsSyncFolder

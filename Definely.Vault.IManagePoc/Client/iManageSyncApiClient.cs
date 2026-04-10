@@ -216,24 +216,10 @@ public class iManageSyncApiClient
 
             _metrics.IncrementApiCall(metricName);
 
-            var response = await SendWithRetryAsync(request, metricName, ct);
-
-            var json = await response.Content.ReadAsStringAsync(ct);
-            var doc = JsonDocument.Parse(json);
-
-            var dataArray = doc.RootElement.GetProperty("data");
-            var count = dataArray.GetArrayLength();
-
-            var pageItems = new List<JsonElement>();
-            foreach (var item in dataArray.EnumerateArray())
-                pageItems.Add(item.Clone());
+            // Fetch + read with retry (covers both connection and read timeouts)
+            var (pageItems, nextCursor, count) = await FetchPageWithRetryAsync(request, metricName, ct);
 
             totalRecords += count;
-
-            // Get cursor before calling callback
-            string? nextCursor = null;
-            if (doc.RootElement.TryGetProperty("cursor", out var cursorElement))
-                nextCursor = cursorElement.GetString();
 
             // Call the per-page callback — this is where the caller saves to DB
             await onPage(new CrawlPageResult(pageItems, nextCursor, pageNumber, totalRecords));
@@ -283,29 +269,22 @@ public class iManageSyncApiClient
 
             _metrics.IncrementApiCall(metricName);
 
-            var response = await SendWithRetryAsync(request, metricName, ct);
+            var (pageItems, nextCursor, count) = await FetchPageWithRetryAsync(request, metricName, ct);
 
-            var json = await response.Content.ReadAsStringAsync(ct);
-            var doc = JsonDocument.Parse(json);
-
-            if (!doc.RootElement.TryGetProperty("data", out var data))
+            if (count == 0 && pageItems.Count == 0)
                 break;
-
-            var pageItems = new List<JsonElement>();
-            foreach (var item in data.EnumerateArray())
-                pageItems.Add(item.Clone());
 
             totalRecords += pageItems.Count;
 
-            string? nextCursor = null;
-            if (doc.RootElement.TryGetProperty("cursor", out var cursor) && data.GetArrayLength() >= pageSize)
-                nextCursor = cursor.GetString();
+            // For GET endpoints, no cursor means last page
+            if (count < pageSize)
+                nextCursor = null;
 
             await onPage(new CrawlPageResult(pageItems, nextCursor, pageNumber, totalRecords));
 
             Console.WriteLine($"[Crawl] {metricName}: page {pageNumber} — {pageItems.Count} records ({totalRecords} total)");
 
-            if (nextCursor == null || data.GetArrayLength() < pageSize)
+            if (nextCursor == null)
                 break;
 
             if (_maxRecords > 0 && totalRecords >= _maxRecords)
@@ -348,6 +327,74 @@ public class iManageSyncApiClient
 
     // ==================== HTTP Retry + Rate Limiting ====================
 
+    /// <summary>
+    /// Fetch a page and parse the response — entire operation is retryable (covers connection AND read timeouts).
+    /// Returns (items, cursor, count).
+    /// </summary>
+    private async Task<(List<JsonElement> Items, string? Cursor, int Count)> FetchPageWithRetryAsync(
+        HttpRequestMessage request, string metricName, CancellationToken ct, int maxRetries = 3)
+    {
+        for (var attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                Console.WriteLine($"[HTTP] {metricName}: sending request (attempt {attempt + 1})...");
+                var clonedRequest = await CloneRequestAsync(request);
+                var response = await _httpClient.SendAsync(clonedRequest, HttpCompletionOption.ResponseHeadersRead, ct);
+                Console.WriteLine($"[HTTP] {metricName}: headers received — {(int)response.StatusCode}, reading body...");
+
+                ReadRateLimitHeaders(response, metricName);
+                response.EnsureSuccessStatusCode();
+
+                using var readCts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                var json = await response.Content.ReadAsStringAsync(readCts.Token);
+                Console.WriteLine($"[HTTP] {metricName}: body read — {json.Length} chars");
+                var doc = JsonDocument.Parse(json);
+
+                if (!doc.RootElement.TryGetProperty("data", out var dataArray))
+                    return ([], null, 0);
+
+                var items = new List<JsonElement>();
+                foreach (var item in dataArray.EnumerateArray())
+                    items.Add(item.Clone());
+
+                string? cursor = null;
+                if (doc.RootElement.TryGetProperty("cursor", out var cursorElement))
+                    cursor = cursorElement.GetString();
+
+                return (items, cursor, items.Count);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && attempt < maxRetries)
+            {
+                // HttpClient timeout (not user cancellation)
+                var delay = Math.Pow(2, attempt + 1);
+                Console.WriteLine($"[Timeout] {metricName}: HTTP request timed out");
+                Console.WriteLine($"[Timeout] Retrying in {delay:F0}s (attempt {attempt + 1}/{maxRetries})");
+                await Task.Delay(TimeSpan.FromSeconds(delay), ct);
+            }
+            catch (Exception ex) when (
+                (ex is HttpRequestException || ex is IOException || ex.InnerException is IOException
+                 || ex is TaskCanceledException || ex is TimeoutException || ex.InnerException is TimeoutException)
+                && attempt < maxRetries)
+            {
+                var delay = Math.Pow(2, attempt + 1);
+                Console.WriteLine($"[Transport] {metricName}: [{ex.GetType().Name}] {ex.InnerException?.Message ?? ex.Message}");
+                Console.WriteLine($"[Transport] Retrying in {delay:F0}s (attempt {attempt + 1}/{maxRetries})");
+                await Task.Delay(TimeSpan.FromSeconds(delay), ct);
+            }
+            catch (Exception ex) when (attempt == maxRetries)
+            {
+                Console.WriteLine($"[Fatal] {metricName}: [{ex.GetType().Name}] max retries exceeded");
+                Console.WriteLine($"[Fatal] {ex.Message}");
+                if (ex.InnerException != null)
+                    Console.WriteLine($"[Fatal] Inner: [{ex.InnerException.GetType().Name}] {ex.InnerException.Message}");
+                throw;
+            }
+        }
+
+        throw new TimeoutException($"Failed to fetch page after {maxRetries} retries for {metricName}");
+    }
+
     private async Task<HttpResponseMessage> SendWithRetryAsync(HttpRequestMessage request, string metricName, CancellationToken ct, int maxRetries = 3)
     {
         for (var attempt = 0; attempt <= maxRetries; attempt++)
@@ -359,7 +406,8 @@ public class iManageSyncApiClient
                 response = await _httpClient.SendAsync(clonedRequest, ct);
             }
             catch (Exception ex) when (
-                (ex is HttpRequestException || ex is IOException || ex.InnerException is IOException)
+                (ex is HttpRequestException || ex is IOException || ex.InnerException is IOException
+                 || ex is TaskCanceledException || ex is TimeoutException || ex.InnerException is TimeoutException)
                 && attempt < maxRetries)
             {
                 var delay = Math.Pow(2, attempt + 1);
