@@ -275,9 +275,22 @@ public class iManageSyncApiClient
     {
         for (var attempt = 0; attempt <= maxRetries; attempt++)
         {
-            var clonedRequest = await CloneRequestAsync(request);
-
-            var response = await _httpClient.SendAsync(clonedRequest, ct);
+            HttpResponseMessage response;
+            try
+            {
+                var clonedRequest = await CloneRequestAsync(request);
+                response = await _httpClient.SendAsync(clonedRequest, ct);
+            }
+            catch (Exception ex) when (
+                (ex is HttpRequestException || ex is IOException || ex.InnerException is IOException)
+                && attempt < maxRetries)
+            {
+                var delay = Math.Pow(2, attempt + 1);
+                Console.WriteLine($"[Transport] {metricName}: {ex.InnerException?.Message ?? ex.Message}");
+                Console.WriteLine($"[Transport] Retrying in {delay:F0}s (attempt {attempt + 1}/{maxRetries})");
+                await Task.Delay(TimeSpan.FromSeconds(delay), ct);
+                continue;
+            }
 
             // Read rate limit headers from every response
             ReadRateLimitHeaders(response, metricName);
