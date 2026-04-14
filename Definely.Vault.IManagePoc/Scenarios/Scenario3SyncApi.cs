@@ -4,6 +4,7 @@ using Definely.Vault.IManagePoc.Client;
 using Definely.Vault.IManagePoc.Data;
 using Definely.Vault.IManagePoc.Data.Entities;
 using Definely.Vault.IManagePoc.Metrics;
+using EFCore.BulkExtensions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 
@@ -146,7 +147,9 @@ public class Scenario3SyncApi : IScenario
                         {
                             var entities = MapUsers(page.Items, syncJob.Id);
                             db.DmsSyncJobUsers.AddRange(entities);
-                            await db.SaveChangesAsync(ct);
+                            await db.BulkSaveChangesAsync(cancellationToken: ct);
+                            db.ChangeTracker.Clear();
+                            db.Attach(syncJob);
                             await UpdateCrawlProgressAsync(db, syncJob.Id, "global", "crawl_global_users", page.Cursor, page.TotalSoFar, ct);
                         },
                         resumeCursor, resumeTotal, ct);
@@ -178,7 +181,9 @@ public class Scenario3SyncApi : IScenario
                             {
                                 var entities = MapDocuments(page.Items, syncJob.Id, libraryId);
                                 db.DmsSyncDocuments.AddRange(entities);
-                                await db.SaveChangesAsync(ct);
+                                await db.BulkSaveChangesAsync(cancellationToken: ct);
+                                db.ChangeTracker.Clear();
+                                db.Attach(syncJob);
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_documents", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -243,8 +248,9 @@ public class Scenario3SyncApi : IScenario
                                 }
                             }
 
-                            await db.SaveChangesAsync(ct);
-                            db.ChangeTracker.Clear(); // Release tracked entities to keep memory flat
+                            await db.BulkSaveChangesAsync(cancellationToken: ct);
+                            db.ChangeTracker.Clear();
+                            db.Attach(syncJob);
                             processed += batch.Count;
                             Console.WriteLine($"[Parents] Updated {processed}/{totalDmsDocCount} documents");
                         }
@@ -265,7 +271,9 @@ public class Scenario3SyncApi : IScenario
                             {
                                 var entities = MapWorkspaces(page.Items, syncJob.Id, libraryId);
                                 db.DmsSyncFolders.AddRange(entities);
-                                await db.SaveChangesAsync(ct);
+                                await db.BulkSaveChangesAsync(cancellationToken: ct);
+                                db.ChangeTracker.Clear();
+                                db.Attach(syncJob);
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_workspaces", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -284,7 +292,9 @@ public class Scenario3SyncApi : IScenario
                             {
                                 var entities = MapFolders(page.Items, syncJob.Id, libraryId);
                                 db.DmsSyncFolders.AddRange(entities);
-                                await db.SaveChangesAsync(ct);
+                                await db.BulkSaveChangesAsync(cancellationToken: ct);
+                                db.ChangeTracker.Clear();
+                                db.Attach(syncJob);
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_folders", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -303,7 +313,9 @@ public class Scenario3SyncApi : IScenario
                             {
                                 var entities = MapDocumentPermissions(page.Items, syncJob.Id);
                                 db.DmsSyncDocumentPermissions.AddRange(entities);
-                                await db.SaveChangesAsync(ct);
+                                await db.BulkSaveChangesAsync(cancellationToken: ct);
+                                db.ChangeTracker.Clear();
+                                db.Attach(syncJob);
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_allowed_doc_trustees", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -321,7 +333,9 @@ public class Scenario3SyncApi : IScenario
                             {
                                 var entities = MapDocumentPermissions(page.Items, syncJob.Id);
                                 db.DmsSyncDocumentPermissions.AddRange(entities);
-                                await db.SaveChangesAsync(ct);
+                                await db.BulkSaveChangesAsync(cancellationToken: ct);
+                                db.ChangeTracker.Clear();
+                                db.Attach(syncJob);
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_denied_doc_trustees", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -340,7 +354,9 @@ public class Scenario3SyncApi : IScenario
                             {
                                 var entities = MapFolderPermissions(page.Items, syncJob.Id);
                                 db.DmsSyncFolderPermissions.AddRange(entities);
-                                await db.SaveChangesAsync(ct);
+                                await db.BulkSaveChangesAsync(cancellationToken: ct);
+                                db.ChangeTracker.Clear();
+                                db.Attach(syncJob);
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_allowed_container_trustees", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -358,7 +374,9 @@ public class Scenario3SyncApi : IScenario
                             {
                                 var entities = MapFolderPermissions(page.Items, syncJob.Id);
                                 db.DmsSyncFolderPermissions.AddRange(entities);
-                                await db.SaveChangesAsync(ct);
+                                await db.BulkSaveChangesAsync(cancellationToken: ct);
+                                db.ChangeTracker.Clear();
+                                db.Attach(syncJob);
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_denied_container_trustees", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -376,13 +394,17 @@ public class Scenario3SyncApi : IScenario
                 var groups = await client.CrawlGroupsAsync(pageSize, ct);
                 var groupEntities = MapCabinetGroups(groups, syncJob.Id, libraryId);
                 db.DmsSyncJobCabinetGroups.AddRange(groupEntities);
-                await db.SaveChangesAsync(ct);
+                await db.BulkSaveChangesAsync(cancellationToken: ct);
+                db.ChangeTracker.Clear();
+                db.Attach(syncJob);
                 Console.WriteLine($"[DB] Saved {groupEntities.Count} cabinet groups");
 
                 var groupMembers = await client.CrawlGroupMembersAsync(pageSize, ct);
                 var memberEntities = MapGroupMembers(groupMembers, syncJob.Id);
                 db.DmsSyncJobGroupMembers.AddRange(memberEntities);
-                await db.SaveChangesAsync(ct);
+                await db.BulkSaveChangesAsync(cancellationToken: ct);
+                db.ChangeTracker.Clear();
+                db.Attach(syncJob);
                 Console.WriteLine($"[DB] Saved {memberEntities.Count} group members");
 
                 // Per-library stats
