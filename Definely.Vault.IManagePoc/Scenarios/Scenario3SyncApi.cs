@@ -147,6 +147,7 @@ public class Scenario3SyncApi : IScenario
                             var entities = MapUsers(page.Items, syncJob.Id);
                             db.DmsSyncJobUsers.AddRange(entities);
                             await db.SaveChangesAsync(ct);
+                            db.ChangeTracker.Clear();
                             await UpdateCrawlProgressAsync(db, syncJob.Id, "global", "crawl_global_users", page.Cursor, page.TotalSoFar, ct);
                         },
                         resumeCursor, resumeTotal, ct);
@@ -179,6 +180,7 @@ public class Scenario3SyncApi : IScenario
                                 var entities = MapDocuments(page.Items, syncJob.Id, libraryId);
                                 db.DmsSyncDocuments.AddRange(entities);
                                 await db.SaveChangesAsync(ct);
+                                db.ChangeTracker.Clear();
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_documents", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -266,6 +268,7 @@ public class Scenario3SyncApi : IScenario
                                 var entities = MapWorkspaces(page.Items, syncJob.Id, libraryId);
                                 db.DmsSyncFolders.AddRange(entities);
                                 await db.SaveChangesAsync(ct);
+                                db.ChangeTracker.Clear();
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_workspaces", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -285,6 +288,7 @@ public class Scenario3SyncApi : IScenario
                                 var entities = MapFolders(page.Items, syncJob.Id, libraryId);
                                 db.DmsSyncFolders.AddRange(entities);
                                 await db.SaveChangesAsync(ct);
+                                db.ChangeTracker.Clear();
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_folders", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -304,6 +308,7 @@ public class Scenario3SyncApi : IScenario
                                 var entities = MapDocumentPermissions(page.Items, syncJob.Id);
                                 db.DmsSyncDocumentPermissions.AddRange(entities);
                                 await db.SaveChangesAsync(ct);
+                                db.ChangeTracker.Clear();
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_allowed_doc_trustees", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -322,6 +327,7 @@ public class Scenario3SyncApi : IScenario
                                 var entities = MapDocumentPermissions(page.Items, syncJob.Id);
                                 db.DmsSyncDocumentPermissions.AddRange(entities);
                                 await db.SaveChangesAsync(ct);
+                                db.ChangeTracker.Clear();
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_denied_doc_trustees", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -341,6 +347,7 @@ public class Scenario3SyncApi : IScenario
                                 var entities = MapFolderPermissions(page.Items, syncJob.Id);
                                 db.DmsSyncFolderPermissions.AddRange(entities);
                                 await db.SaveChangesAsync(ct);
+                                db.ChangeTracker.Clear();
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_allowed_container_trustees", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -359,6 +366,7 @@ public class Scenario3SyncApi : IScenario
                                 var entities = MapFolderPermissions(page.Items, syncJob.Id);
                                 db.DmsSyncFolderPermissions.AddRange(entities);
                                 await db.SaveChangesAsync(ct);
+                                db.ChangeTracker.Clear();
                                 await UpdateCrawlProgressAsync(db, syncJob.Id, libraryId, "crawl_denied_container_trustees", page.Cursor, page.TotalSoFar, ct);
                             },
                             resumeCursor, resumeTotal, ct);
@@ -377,12 +385,14 @@ public class Scenario3SyncApi : IScenario
                 var groupEntities = MapCabinetGroups(groups, syncJob.Id, libraryId);
                 db.DmsSyncJobCabinetGroups.AddRange(groupEntities);
                 await db.SaveChangesAsync(ct);
+                db.ChangeTracker.Clear();
                 Console.WriteLine($"[DB] Saved {groupEntities.Count} cabinet groups");
 
                 var groupMembers = await client.CrawlGroupMembersAsync(pageSize, ct);
                 var memberEntities = MapGroupMembers(groupMembers, syncJob.Id);
                 db.DmsSyncJobGroupMembers.AddRange(memberEntities);
                 await db.SaveChangesAsync(ct);
+                db.ChangeTracker.Clear();
                 Console.WriteLine($"[DB] Saved {memberEntities.Count} group members");
 
                 // Per-library stats
