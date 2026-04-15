@@ -398,6 +398,10 @@ public class Scenario3SyncApi : IScenario
                 totalLibraryUsers += libUsers;
             }
 
+            // Re-attach syncJob in case ChangeTracker was cleared during parent updates
+            if (db.Entry(syncJob).State == EntityState.Detached)
+                db.Attach(syncJob);
+
             // Update sync job
             syncJob.SyncJobState = 128; // Completed
             syncJob.FinishedAt = DateTimeOffset.UtcNow;
@@ -452,6 +456,8 @@ public class Scenario3SyncApi : IScenario
 
             try
             {
+                if (db.Entry(syncJob).State == EntityState.Detached)
+                    db.Attach(syncJob);
                 syncJob.SyncJobState = 20; // InProgress but interrupted — can be resumed
                 syncJob.ErrorDetails = ex.InnerException?.Message ?? ex.Message;
                 syncJob.LastModifiedAt = DateTimeOffset.UtcNow;

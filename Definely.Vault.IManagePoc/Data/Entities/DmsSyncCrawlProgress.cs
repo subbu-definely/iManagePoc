@@ -9,6 +9,7 @@ public class DmsSyncCrawlProgress
     public string? LastCursor { get; set; }
     public int RecordsSaved { get; set; }
     public bool IsComplete { get; set; }
+    public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset LastUpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     public DmsSyncJobInfo DmsSyncJobInfo { get; set; } = null!;
